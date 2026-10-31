@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "reference": "transformers==5.19.0; torch==2.14.1; CPU float32",
+  "candidate": "mlx==0.32.3; Metal float32; MLX_ENABLE_TF32=0",
+  "justification": "FP32 reduction-order differences are bounded by the original independent review tolerance; boolean masks and feature placement must match exactly.",
+  "required_arrays": [
+    "schema_version",
+    "logits",
+    "image_features",
+    "attention_mask"
+  ],
+  "required_finite_arrays": [
+    "logits",
+    "image_features"
+  ],
+  "arrays": {
+    "schema_version": {
+      "dtype": "int64",
+      "shape": [],
+      "allow_nan": false,
+      "allow_inf": false,
+      "atol": 0,
+      "rtol": 0
+    },
+    "logits": {
+      "dtype": "float32",
+      "shape": [
+        null,
+        null,
+        null
+      ],
+      "allow_nan": false,
+      "allow_inf": false,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "logprobs": {
+      "dtype": "float32",
+      "shape": [
+        null
+      ],
+      "allow_nan": false,
+      "allow_inf": false,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "embeddings": {
+      "dtype": "float32",
+      "shape": [
+        null,
+        null,
+        null
+      ],
+      "allow_nan": false,
+      "allow_inf": false,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "image_features": {
+      "dtype": "float32",
+      "shape": [
+        null,
+        null,
+        null
+      ],
+      "allow_nan": false,
+      "allow_inf": false,
+      "atol": 2e-05,
+      "rtol": 2e-05
+    },
+    "attention_mask": {
+      "dtype": "bool",
+      "shape": [
+        null,
+        1,
+        null,
+        null
+      ],
+      "allow_nan": false,
+      "allow_inf": false,
+      "atol": 0,
+      "rtol": 0
+    }
+  },
+  "downstream_requirements": {
+    "medical_parity": {
+      "required_arrays": [
+        "schema_version",
+        "logits",
+        "image_features",
+        "attention_mask"
+      ],
+      "require_finite": true
+    }
+  }
+}

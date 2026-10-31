@@ -1,0 +1,11 @@
+graft mlx_vlm
+include pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md
+prune tests
+prune scripts
+prune docs
+prune contracts
+prune artifacts
+prune environment
+prune devtools
+global-exclude AGENTS.md CLAUDE.md SKILL.md
+global-exclude *.pyc *.pyo

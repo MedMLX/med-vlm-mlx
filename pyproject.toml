@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=84.1.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "med-vlm-mlx"
+dynamic = ["version"]
+description = "MedGemma medical vision-language inference on Apple Silicon."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "mlx==0.32.3",
+    "transformers==5.19.0",
+    "jinja2>=3.1.6",
+    "sentencepiece>=0.2.1",
+    "tqdm>=4.66.3",
+    "Pillow>=13,<14",
+    "requests>=2.33.0",
+    "fastapi>=0.143.0",
+    "starlette>=1.3.1",
+    "uvicorn",
+    "numpy",
+]
+license = "MIT AND Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [
+    {name = "Prince Canuma", email = "prince.gdt@gmail.com"},
+    {name = "Alfredo Sandoval"},
+]
+classifiers = [
+    "Operating System :: MacOS :: MacOS X",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Repository = "https://github.com/MedMLX/med-vlm-mlx"
+Upstream = "https://github.com/Blaizzy/mlx-vlm"
+
+[project.scripts]
+"mlx_vlm.convert" = "mlx_vlm.convert:main"
+"mlx_vlm.generate" = "mlx_vlm.generate:main"
+"mlx_vlm.server" = "mlx_vlm.server:main"
+
+[tool.setuptools.packages.find]
+include = ["mlx_vlm*"]
+exclude = ["mlx_vlm.tests*"]
+
+[tool.setuptools.package-data]
+mlx_vlm = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = {attr = "mlx_vlm.version.__version__"}
+
+[project.optional-dependencies]
+medical = ["fsspec==2026.9.0", "torch==2.14.1"]
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "hypothesis==6.168.5", "pyright==1.1.414", "black==26.10.1", "isort==9.0.2", "ruff==0.15.21", "httpx2==2.16.0"]
+
+[tool.uv]
+constraint-dependencies = ["filelock>=4.2.1",
+    "aiohttp>=3.14.4", "anyio>=4.14.2", "certifi>=2026.10.19",
+    "fsspec>=2026.6.0", "idna>=3.15", "multidict>=6.9.1",
+    "orjson>=3.11.6", "pyarrow>=23.0.1", "pygments>=2.20.0",
+    "setuptools>=84.1.0", "urllib3>=2.8.0",
+]
+
+[tool.pyright]
+extraPaths = ["src", "tests", "scripts"]
+# Directory coverage also checks newly added first-party modules.
+include = ["mlx_vlm", "scripts", "tests", "typings", "environment", "devtools"]
+pythonVersion = "3.13"
+stubPath = "typings"
+pythonPlatform = "Darwin"
+typeCheckingMode = "standard"
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff.lint]
+select = ["TID251", "TID252"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]

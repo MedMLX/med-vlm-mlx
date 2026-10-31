@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "checkpoints": [
+    {"name": "medgemma", "repo_id": "mlx-community/medgemma-1.5-4b-it-4bit", "revision": "762746b7a72b0b68dd8fa3f9aea5dc3980674d23"},
+    {"name": "medgemma-4b-v1", "repo_id": "mlx-community/medgemma-4b-it-4bit", "revision": "db10be5ae6bd569e2063c3c74b9b9dfbcbedcad3"},
+    {"name": "medgemma-27b", "repo_id": "mlx-community/medgemma-27b-it-4bit", "revision": "f57d2d648d28950b1bc7abd6e1b7b06aff0e183a"}
+  ]
+}

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="schema_version" content="1">
+  <title>MedMLX implementation policy and evidence</title>
+  <style>
+    :root { color-scheme: light; font: 17px/1.65 system-ui, sans-serif; color: #172b3a; background: #f3f6f8; }
+    body { max-width: 920px; margin: 48px auto; padding: 42px; background: white; }
+    h1 { font-size: 2.1rem; line-height: 1.15; letter-spacing: -.035em; }
+    h2 { margin-top: 2rem; font-size: 1.3rem; }
+    .eyebrow { color: #456578; font-size: .8rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .lead { font-size: 1.12rem; }
+    .status { padding: 16px 20px; border-left: 4px solid #176577; background: #edf7f8; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { padding: 13px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #dce3e8; }
+    th { background: #f3f6f8; }
+    code { font-size: .86em; overflow-wrap: anywhere; }
+    pre { background: #f3f6f8; padding: 16px; overflow-x: auto; }
+    a { color: #096478; text-underline-offset: .15em; }
+    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #dce3e8; font-size: .85rem; color: #456578; }
+    @media (max-width: 640px) { body { margin: 0; padding: 24px; } table { font-size: .8rem; } }
+    @media print { body { margin: 0; padding: 0; } h2 { break-after: avoid; } tr { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+  <div class="eyebrow">MedMLX · engineering evidence · 8 October 2026</div>
+  <h1>Medical model inference on Apple Silicon: corrections and tested evidence</h1>
+  <p class="lead">A scoped fork of MLX-VLM corrects reproducible errors in the
+  Gemma3/MedGemma path. The evidence supports inference correctness
+  on the tested cases. Clinical accuracy and a performance advantage remain unmeasured.</p>
+  <p class="status"><strong>Local development candidate.</strong> The recorded
+  checks describe a dated review. No checkpoint was retrained or published.</p>
+
+  <h2>Corrections and their consequences</h2>
+  <table>
+    <thead><tr><th>Observed problem</th><th>Implemented behavior</th></tr></thead>
+    <tbody>
+      <tr><td>Gemma generation dropped the image attention mask; direct forward allowed future text.</td><td>Causal text attention and bidirectional attention within each image block persist through decoding, padding and rotating sliding caches.</td></tr>
+      <tr><td>MedGemma's actual width of 2560 conflicted with a default width of 2048.</td><td>Feature scaling derives from the actual embedding width and cancels the exact language embedding scaler.</td></tr>
+      <tr><td>Gemma scaled caller-owned embeddings in place.</td><td>Language inference preserves the supplied embedding array.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Numerical evidence</h2>
+  <p>The reference is Transformers 5.19.0 with Torch 2.14.1 on CPU. The candidate
+  uses MLX 0.32.3 on an Apple M1 Max with 64 GiB memory, Metal, FP32 and
+  <code>MLX_ENABLE_TF32=0</code>. Tiny models share the same weights. The fixed
+  tolerance is <code>atol=2e-5, rtol=2e-5</code>; masks and placement order require
+  exact agreement.</p>
+  <ul>
+    <li>Complete Gemma pixels-to-logits path: maximum absolute error <strong>1.2666e-7</strong>. The fixture uses nonzero projector weights and requires changed pixels to change logits.</li>
+    <li>Gemma projected image features: maximum absolute error <strong>4.4704e-8</strong>. Attention masks agree exactly.</li>
+    <li>Additional cases cover multiple images, cache rotation, requested prefill chunk sizes, missing/surplus features, nonfinite features and property-based placement/mask checks.</li>
+  </ul>
+  <p>Inspect the <a href="../contracts/medical-fp32.json">numeric contract</a> and
+  <a href="../tests/medical/test_regressions.py">regression tests</a>.
+  These FP32 checks do not establish numerical parity for full quantized medical checkpoints.</p>
+
+  <h2>Real checkpoint integration</h2>
+  <p>The pinned 4-bit checkpoints load with strict weight matching and run through
+  the public image generation entrypoint. Their exact revisions are recorded
+  in <a href="../scripts/checkpoints.json">the checkpoint manifest</a>. The smoke
+  input is a public CC0
+  <a href="https://commons.wikimedia.org/wiki/File:Normal_posteroanterior_(PA)_chest_radiograph_(X-ray).jpg">normal PA chest radiograph</a>,
+  downloaded per run, with the prompt “Describe this chest X-ray.” Observed on
+  2026-10-30 with greedy decoding and up to 128 new tokens:</p>
+  <table>
+    <thead><tr><th>Checkpoint</th><th>Observed behavior</th></tr></thead>
+    <tbody>
+      <tr><td>MedGemma 1.5 4B</td><td>Produced nonempty text.</td></tr>
+      <tr><td>MedGemma 4B v1</td><td>Produced nonempty text.</td></tr>
+      <tr><td>MedGemma 27B multimodal</td><td>Produced nonempty text.</td></tr>
+    </tbody>
+  </table>
+  <p>One image is not a clinical benchmark and does not establish diagnostic
+  accuracy.</p>
+
+  <h2>Scope and implementation decisions</h2>
+  <p><strong>Inference-only package.</strong> SFT/ORPO trainers, fine-tuning
+  datasets and CLI, optimizer helpers, and custom rotary gradient hooks are
+  removed. Pretrained LoRA/DoRA adapters load through one inference action that
+  checks their targets and tensors before changing the model. Retaining trainer
+  utilities in the inference loader was rejected because it imported training
+  machinery into ordinary model loading. The general evaluation extra was
+  removed in the version 0.2 medical scope cutover.</p>
+  <p>The qualified paths are direct model calls and single-request autoregressive
+  generation. The suite includes synthetic padded direct batches. Continuous
+  batching, automatic prefix caching, speculative multimodal decoding, video
+  timestamps, long-context memory use and additional inherited architectures are
+  outside this qualification.</p>
+  <p><strong>Runtime scope.</strong> The source retains MedGemma, shared
+  inference infrastructure and text HTTP protocols.
+  The broader catalog and media-generation entry points were removed. The
+  measurements above describe the dated review, not a new qualification of
+  every current service path.</p>
+  <p><strong>Whole image prefill.</strong> Gemma prompts containing image tokens
+  are prefilled as a whole. Arbitrary chunks can divide a bidirectional image
+  block before all its keys exist. Such partial blocks are rejected explicitly;
+  text-only chunked prefill remains enabled. Image-aligned scheduling is deferred.
+  Full prompt masks require quadratic memory in prompt length, so long-context
+  throughput and memory need separate measurement.</p>
+  <p><strong>Maintained fork.</strong> A complete rewrite was rejected because the
+  reproduced failures are localized and upstream already provides weight loading,
+  quantization, tokenization, vision encoders and generation infrastructure.
+  Retaining that infrastructure keeps attribution intact and makes the corrected
+  behavior directly comparable. A universal claim of superiority is not supported.</p>
+
+  <h2>Repeat the checks</h2>
+  <pre><code>make env
+make qa
+make smoke-medgemma</code></pre>
+  <p>Use an isolated environment: this distribution is named <code>med-vlm-mlx</code>
+  but intentionally retains the <code>mlx_vlm</code> import namespace. The MLX
+  backend is selected explicitly and the medical suite requires Metal. Smoke
+  checks download model weights when absent. They require a nonempty generation;
+  output quality must be interpreted separately.</p>
+
+  <footer>Schema version 1. Human owner: Alfredo Sandoval. Based on
+  Blaizzy/mlx-vlm commit <code>c24454765c3177a385185c185b4957567c5fdf89</code> (0.7.7),
+  credited to Prince Canuma and contributors under the retained MIT license.
+  The recorded review used version 0.1.0; the medical scope cutover is version 0.2.0. See <a href="../THIRD_PARTY_NOTICES.md">attribution</a>.</footer>
+</body>
+</html>
