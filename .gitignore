@@ -1,0 +1,38 @@
+# MedMLX standard
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.DS_Store
+# Never commit secrets (Hugging Face tokens)
+.env
+# Never commit data or weights
+/data/
+/work/
+/weights/
+/models/
+/checkpoints/
+/outputs/
+*.nii
+*.nii.gz
+*.dcm
+*.nrrd
+*.mha
+*.mhd
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.h5
+*.npy
+*.npz
+!tests/fixtures/**/*.npz
