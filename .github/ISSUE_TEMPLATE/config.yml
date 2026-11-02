@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Request a model
+    url: https://github.com/MedMLX/.github/issues/new?template=model-request.yml
+    about: Suggest a medical imaging model for a MedMLX port.
+  - name: Ask a question
+    url: https://github.com/MedMLX/.github/discussions/categories/q-a
+    about: Get help with installation, choosing a model or using MedMLX.
+  - name: Share your work
+    url: https://github.com/MedMLX/.github/discussions/categories/show-and-tell
+    about: Share a research project, tool or workflow using MedMLX.

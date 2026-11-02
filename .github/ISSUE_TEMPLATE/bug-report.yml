@@ -1,0 +1,48 @@
+name: Report a bug
+description: Report a reproducible problem with a MedMLX package.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use the repository for the affected package and check its existing issues first.
+        For installation or usage questions, ask in [Q&A](https://github.com/MedMLX/.github/discussions/categories/q-a).
+  - type: input
+    id: package-version
+    attributes:
+      label: Package and version
+      description: Include the model or variant if relevant, or the Git revision for a source checkout.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your Mac chip, unified memory, macOS and Python versions, and how you installed the package.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the command or a minimal code example and describe the input format.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error message
+      description: Optional. Include the relevant error text.
+      render: text
