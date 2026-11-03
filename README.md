@@ -127,10 +127,11 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 The server binds 127.0.0.1:8080 by default and provides `/v1/chat/completions`,
 `/v1/models`, `/health`, `/metrics` and `/v1/settings` for runtime settings;
 schemas are at `/docs` while it runs. `--api-key` requires a bearer token for
-inference and management requests, and `--model-dir` adds folders to search for
-models. Images go in an `image_url` content part next to the text. Requests are
-batched when their sampling, seed and logprob settings match; others wait their
-turn in queue order.
+inference and management requests and is required when binding outside loopback.
+`--model-dir` adds folders to search for models. Images use a base64
+`data:image/...` URI in an `image_url` content part next to the text. Requests
+are batched when their sampling, seed and logprob settings match; others wait
+their turn in queue order.
 
 ### Inputs and limitations
 

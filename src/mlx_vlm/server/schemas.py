@@ -76,6 +76,22 @@ def _reject_unsupported_items(value: object) -> None:
         or item.get("tool_call_id") is not None
     ):
         raise ValueError("Tool calling is outside the medical runtime")
+    if kind in ("image_url", "input_image"):
+        source = item.get("image_url")
+        if isinstance(source, dict):
+            source = cast(dict[str, object], source).get("url")
+        if not isinstance(source, str):
+            raise ValueError("HTTP images require a base64 data:image URI")
+        header, separator, data = source.partition(",")
+        if not (
+            separator
+            and data
+            and header.startswith("data:image/")
+            and header.endswith(";base64")
+        ):
+            # The Python image loader accepts URLs and paths; the HTTP boundary
+            # must not let request data read the server's network or filesystem.
+            raise ValueError("HTTP images require a base64 data:image URI")
     _reject_unsupported_items(item.get("content"))
 
 
