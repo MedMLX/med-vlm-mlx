@@ -1,5 +1,7 @@
 """The HTTP API keeps request images and network exposure at trusted boundaries."""
 
+import traceback
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -7,6 +9,7 @@ from pydantic import ValidationError
 from mlx_vlm.server.app import app
 from mlx_vlm.server.cli import parse_arguments
 from mlx_vlm.server.schemas import ChatRequest
+from mlx_vlm.utils import load_image
 
 
 @pytest.mark.parametrize(
@@ -48,6 +51,13 @@ def test_http_image_accepts_inline_data() -> None:
         ],
     }
     assert ChatRequest.model_validate(payload).messages[0].role == "user"
+
+
+def test_invalid_inline_image_error_redacts_source() -> None:
+    source = "data:image/png;base64,cHJpdmF0ZS1pbWFnZS1ieXRlcw=="
+    with pytest.raises(ValueError, match="Failed to load image") as error:
+        load_image(source)
+    assert source not in "".join(traceback.format_exception(error.value))
 
 
 def test_browser_origin_cannot_access_loopback_api() -> None:
