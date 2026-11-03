@@ -28,6 +28,11 @@ class ServerArguments(argparse.Namespace):
     log_level: str
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Match the unauthenticated server's accepted Host names."""
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
 def parse_arguments(argv: list[str] | None = None) -> ServerArguments:
     """Parse medical model selection, networking and cache controls."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -47,6 +52,10 @@ def parse_arguments(argv: list[str] | None = None) -> ServerArguments:
         parser.error("--port must be between 0 and 65535")
     if args.max_tokens <= 0 or args.prefill_step_size <= 0:
         parser.error("token counts must be positive")
+    if not _is_loopback_host(args.host) and not (
+        args.api_key or os.environ.get("MLX_VLM_SERVER_API_KEY")
+    ):
+        parser.error("--api-key is required when --host is not loopback")
     return args
 
 

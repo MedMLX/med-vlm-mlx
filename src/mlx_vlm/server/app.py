@@ -13,12 +13,13 @@ from typing import Annotated, List, Optional, Tuple, TypedDict
 
 import mlx.core as mx
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import scan_cache_dir
 from huggingface_hub.errors import CacheNotFound
 from pydantic import TypeAdapter
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import HTTPConnection
 from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mlx_vlm.contracts import (
     ImageSource,
@@ -74,6 +75,22 @@ def _require_management_api_key(request: HTTPConnection) -> None:
             detail="Invalid API key",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+class _TrustedHostPolicy:
+    """Reject browser DNS rebinding in tokenless mode; retain remote keyed access."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.loopback = TrustedHostMiddleware(
+            app,
+            allowed_hosts=["localhost", "127.0.0.1", "[::1]"],
+            www_redirect=False,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        target = self.app if _server_api_key() else self.loopback
+        await target(scope, receive, send)
 
 
 class ServedModel(TypedDict):
@@ -264,16 +281,9 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+app.add_middleware(_TrustedHostPolicy)
 inference_router = APIRouter(
     dependencies=[Depends(_require_management_api_key)],
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
 )
 
 MAX_IMAGES = 10  # Maximum number of images to process at once

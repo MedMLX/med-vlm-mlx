@@ -874,7 +874,6 @@ def load_image(
     """
     import base64
 
-    original_source = image_source
     try:
         if isinstance(image_source, Image.Image):
             image = image_source
@@ -898,8 +897,10 @@ def load_image(
             image = Image.open(image_source)
     except ValueError:
         raise
-    except (OSError, requests.RequestException) as e:
-        raise ValueError(f"Failed to load image from {original_source}: {e}") from e
+    except (OSError, requests.RequestException) as error:
+        # Image sources can be inline medical data or URLs with private tokens.
+        # Neither the source nor the underlying exception belongs in API logs.
+        raise ValueError(f"Failed to load image ({type(error).__name__})") from None
 
     image = ImageOps.exif_transpose(image)
     return image.convert("RGB")
