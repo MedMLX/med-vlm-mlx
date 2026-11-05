@@ -2180,7 +2180,7 @@ def batch_generate(
     all_image_sizes: list[tuple[int, int] | None] = [None] * len(prompts)
     total_stats = BatchStats()
 
-    for shape, indices in grouped_indices.items():
+    for indices in grouped_indices.values():
         # Get images and prompts for this shape group
         group_images = [processed_images[i] for i in indices]
         group_prompts = [prompts[i] for i in indices]

@@ -176,14 +176,11 @@ type StateView = (
 type KVPair = tuple[mx.array, mx.array]
 type QuantizedTensor = tuple[mx.array, mx.array, mx.array]
 type KVBuffer = mx.array | QuantizedTensor
-type AttentionMask = mx.array | str | None
 
-# Numeric constructors validate arbitrary ingress values and either return the
-# stated scalar type or raise their native exception. Keep that error behavior
+# The int constructor validates arbitrary ingress values and either returns an
+# int or raises its native exception. Keep that error behavior
 # at JSON/config boundaries instead of coercing through str or hiding errors.
 parse_int = cast(Callable[[object], int], int)
-parse_float = cast(Callable[[object], float], float)
-parse_path = cast(Callable[[object], Path], Path)
 
 
 def is_json_value(value: object) -> TypeIs[JSONValue]:
@@ -336,9 +333,6 @@ type ModelArgument = (
     | list[list[Callable[[mx.array, mx.array], mx.array]] | None]
 )
 type PromptInputs = dict[str, ModelArgument]
-# Module.update() represents parameter children as maps and indexed lists.
-type ParameterNode = mx.array | dict[str, ParameterNode] | list[ParameterNode]
-type ParameterTree = dict[str, ParameterNode]
 
 
 def is_int_list(value: object) -> TypeIs[list[int]]:

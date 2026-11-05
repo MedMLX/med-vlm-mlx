@@ -102,12 +102,10 @@ class PromptTooLongError(ValueError):
 
 
 def _notify_queues(queues: Iterable[Queue[GenerationEvent]], *items: GenerationEvent):
+    # Request queues are unbounded, so put() cannot block or raise.
     for queue in queues:
         for item in items:
-            try:
-                queue.put(item)
-            except Exception:
-                break
+            queue.put(item)
 
 
 def get_prefill_step_size():
@@ -1607,10 +1605,7 @@ class ResponseGenerator:
                                 info.get("request_id", uid),
                                 int(info.get("generated_tokens", 0) or 0),
                             )
-                            try:
-                                info["rqueue"].put(None)
-                            except Exception:
-                                pass
+                            info["rqueue"].put(None)
 
                 if new_items and batch_gen is not None and not active:
                     if not batch_gen.has_work:

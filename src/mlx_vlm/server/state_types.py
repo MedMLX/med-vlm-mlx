@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from queue import Queue
-from threading import Lock
 from typing import TYPE_CHECKING, TypedDict
 
 from mlx_vlm.contracts import PromptInputs
@@ -31,7 +30,6 @@ class ModelResources(TypedDict, total=False):
     config: GenerationConfigLike
     vision_cache: VisionFeatureCache
     response_generator: ResponseGenerator | None
-    generation_lock: Lock
 
 
 type GenerationEvent = GenerationContext | StreamingToken | Exception | None

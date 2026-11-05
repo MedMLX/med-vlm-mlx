@@ -4,7 +4,6 @@ from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
-import numpy as np
 
 from mlx_vlm.models.attention import VisionAttention as Attention
 from mlx_vlm.models.base import check_array_shape
@@ -92,7 +91,7 @@ class VisionEmbeddings(nn.Module):
         """Patchify ``(batch, height, width, channels)`` pixels and add positions."""
         patch_embeddings = self.patch_embedding(x)
         patch_embeddings = mx.flatten(patch_embeddings, start_axis=1, end_axis=2)
-        position_ids = mx.array(np.arange(self.num_positions)[None, :])
+        position_ids = mx.arange(self.num_positions)[None, :]
         embeddings = patch_embeddings
         embeddings += self.position_embedding(position_ids)
         return embeddings

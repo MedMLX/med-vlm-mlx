@@ -50,8 +50,6 @@ from mlx_vlm.server.state_types import ModelResources
 from mlx_vlm.version import __version__
 from mlx_vlm.vision_cache import VisionFeatureCache
 
-DEFAULT_SERVER_HOST = "127.0.0.1"
-DEFAULT_SERVER_PORT = 8080
 SERVER_API_KEY_ENV = "MLX_VLM_SERVER_API_KEY"
 
 logger = logging.getLogger("mlx_vlm.server")
@@ -139,14 +137,11 @@ def _server_runtime_snapshot() -> JSONObject:
         if native_context_size is not None and configured_context_limit is not None
         else configured_context_limit or native_context_size
     )
-    queue_depth = 0
-    if runtime.response_generator is not None and hasattr(
-        runtime.response_generator, "requests"
-    ):
-        try:
-            queue_depth = runtime.response_generator.requests.qsize()
-        except Exception:
-            queue_depth = 0
+    queue_depth = (
+        0
+        if runtime.response_generator is None
+        else runtime.response_generator.requests.qsize()
+    )
 
     return TypeAdapter(JSONObject).validate_python(
         {
@@ -222,19 +217,13 @@ def _count_thinking_tag_tokens(
     return count
 
 
-def _decode_token(
-    tokenizer: TokenDecoder, token_id: int
-) -> Tuple[str, Optional[List[int]]]:
-    """Decode a single token id to its string + UTF-8 bytes."""
-    try:
-        text = tokenizer.decode([int(token_id)])
-    except Exception:
-        text = ""
-    try:
-        token_bytes = list(text.encode("utf-8"))
-    except Exception:
-        token_bytes = None
-    return text, token_bytes
+def _decode_token(tokenizer: TokenDecoder, token_id: int) -> Tuple[str, List[int]]:
+    """Decode a single token id to its string + UTF-8 bytes.
+
+    Decoder errors propagate so a logprob entry never reports an empty token.
+    """
+    text = tokenizer.decode([int(token_id)])
+    return text, list(text.encode("utf-8"))
 
 
 def _make_logprob_content(
@@ -285,8 +274,6 @@ app.add_middleware(_TrustedHostPolicy)
 inference_router = APIRouter(
     dependencies=[Depends(_require_management_api_key)],
 )
-
-MAX_IMAGES = 10  # Maximum number of images to process at once
 
 
 def _unload_model_cache_group(cache_group: str) -> bool:

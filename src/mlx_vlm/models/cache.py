@@ -10,9 +10,7 @@ step.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
-from math import ceil
-from typing import List, Optional, Protocol, Self, cast
+from typing import List, Optional, cast
 
 import mlx.core as mx
 
@@ -20,7 +18,6 @@ from mlx_vlm.contracts import (
     CacheComponent,
     CacheFactory,
     CacheModel,
-    KVBuffer,
     QuantizedTensor,
     StateTree,
     StateView,
@@ -82,19 +79,6 @@ def _packed_pair_state(value: StateTree) -> PackedPairState:
 
 def _metadata_ints(value: StateTree, count: int) -> list[int]:
     return [parse_int(item) for item in _state_items(value, count)]
-
-
-class _KVMemoryView(Protocol):
-    @property
-    def keys(self) -> KVBuffer | None: ...
-
-    @property
-    def values(self) -> KVBuffer | None: ...
-
-
-class _WindowedKVMemoryView(_KVMemoryView, Protocol):
-    @property
-    def max_size(self) -> int: ...
 
 
 def should_quantize_kv_layer(layer_idx: int, num_layers: int) -> bool:
@@ -191,91 +175,8 @@ def create_attention_mask(
         return "causal"
 
 
-@dataclass(frozen=True)
-class CacheMemory:
-    """One row's allocation policy, measured without copying cache tensors."""
-
-    source_bytes: int = 0
-    fixed_bytes: int = 0
-    bytes_per_token: float = 0
-    step: int = 1
-    window_size: Optional[int] = None
-    fallback: bool = False
-    min_capacity: int = 0
-
-    def footprint(self, tokens: int, chunk_size: Optional[int] = None) -> int:
-        """Return allocated bytes for ``tokens``, rounded up to ``step``.
-
-        A sliding window caps capacity at the window plus one chunk, and
-        ``min_capacity`` forces a floor for buffers kept from a source cache.
-        """
-        if tokens <= 0:
-            return 0
-        if self.window_size is not None and chunk_size is not None:
-            tokens = min(tokens, self.window_size - 1 + chunk_size)
-        tokens = max(tokens, self.min_capacity)
-        step = max(1, self.step)
-        capacity = ((tokens + step - 1) // step) * step
-        return self.fixed_bytes + ceil(capacity * self.bytes_per_token)
-
-
-def cache_nbytes(value: object, seen: Optional[set[int]] = None) -> int:
-    """Account cache buffers without evaluating or cloning their contents."""
-    if value is None:
-        return 0
-    seen = set() if seen is None else seen
-    if id(value) in seen:
-        return 0
-    seen.add(id(value))
-    if isinstance(value, dict):
-        return sum(
-            cache_nbytes(v, seen) for v in cast(dict[object, object], value).values()
-        )
-    if isinstance(value, (list, tuple)):
-        return sum(cache_nbytes(v, seen) for v in cast(Sequence[object], value))
-    try:
-        size: object = getattr(value, "nbytes", None)
-        if isinstance(size, int):
-            return size
-    except (AttributeError, NotImplementedError):
-        pass
-    return cache_nbytes(getattr(value, "state", None), seen) + cache_nbytes(
-        getattr(value, "meta_state", None), seen
-    )
-
-
-def _kv_memory_profile(c: _KVMemoryView, token_count: int) -> CacheMemory:
-    if c.keys is None:
-        return CacheMemory()
-    keys = c.keys[0] if isinstance(c.keys, tuple) else c.keys
-    capacity = keys.shape[2]
-    size = cache_nbytes(c.keys) + cache_nbytes(c.values)
-    return CacheMemory(
-        source_bytes=size,
-        bytes_per_token=size / capacity if capacity else 0,
-        step=parse_int(getattr(c, "step", 1)),
-    )
-
-
-def _windowed_memory_profile(c: _WindowedKVMemoryView, token_count: int) -> CacheMemory:
-    return replace(_kv_memory_profile(c, token_count), window_size=c.max_size)
-
-
 class BaseCache:
-    """Common cache contract: state round trip, trimming and memory accounting."""
-
-    def memory_profile(self, token_count: int) -> CacheMemory | None:
-        """Describe standard KV buffers; other layouts override this method."""
-        if not hasattr(self, "keys") or not hasattr(self, "values"):
-            return None
-        # Native subclasses with these attributes own dense or packed KV buffers.
-        profile = _kv_memory_profile(cast(_KVMemoryView, self), token_count)
-        try:
-            if self.nbytes > profile.source_bytes:
-                return None  # Auxiliary state needs its own profile.
-        except (AttributeError, NotImplementedError):
-            pass
-        return profile
+    """Common cache contract: state round trip and trimming."""
 
     @property
     def state(self) -> StateView:
@@ -312,25 +213,11 @@ class BaseCache:
         """
         return 0
 
-    @property
-    def nbytes(self) -> int:
-        """Return the size of this cache in bytes"""
-        raise NotImplementedError("Cache sub-class must implement nbytes")
-
     def empty(self) -> bool:
         """
         Return if the cache is empty or not.
         """
         raise NotImplementedError("Cache sub-class must implement this.")
-
-    @classmethod
-    def from_state(cls, state: StateTree, meta_state: StateTree) -> Self:
-        """Rebuild a cache from snapshots without calling ``__init__``."""
-        # Create an instance of cls without calling __init__
-        obj = cls.__new__(cls)
-        obj.state = state
-        obj.meta_state = meta_state
-        return obj
 
 
 class QuantizedKVCache(BaseCache):
@@ -455,11 +342,6 @@ class QuantizedKVCache(BaseCache):
         """Report whether no keys have been stored."""
         return self.keys is None
 
-    @property
-    def nbytes(self) -> int:
-        """Return bytes held by packed keys and values, including spare capacity."""
-        return cache_nbytes((self.keys, self.values))
-
 
 class KVCache(BaseCache):
     """Append attention keys and values in 256-token allocation increments.
@@ -467,7 +349,7 @@ class KVCache(BaseCache):
     Inputs have shape ``(batch, heads, tokens, head_dim)``; key and value head
     widths can differ. ``offset`` is the logical token count, while allocated
     buffers can be longer. ``state`` and ``update_and_fetch`` expose only the
-    logical prefix; ``nbytes`` includes unused capacity.
+    logical prefix.
     """
 
     step = 256
@@ -575,14 +457,6 @@ class KVCache(BaseCache):
         """Report whether no keys have been stored."""
         return self.keys is None
 
-    @property
-    def nbytes(self) -> int:
-        """Return bytes held by the key and value buffers, including spare capacity."""
-        if self.keys is None:
-            return 0
-        assert self.values is not None
-        return self.keys.nbytes + self.values.nbytes
-
 
 class RotatingKVCache(BaseCache):
     """Keep a fixed prefix and a rotating window of attention keys and values.
@@ -593,10 +467,6 @@ class RotatingKVCache(BaseCache):
     exceed ``max_size`` to preserve each query's window. A rotated cache cannot
     be trimmed back to an arbitrary earlier prefix.
     """
-
-    def memory_profile(self, token_count: int) -> CacheMemory:
-        """Profile the windowed KV buffers for allocation accounting."""
-        return _windowed_memory_profile(self, token_count)
 
     step = 256
 
@@ -802,24 +672,6 @@ class RotatingKVCache(BaseCache):
     def empty(self) -> bool:
         """Report whether no keys have been stored."""
         return self.keys is None
-
-    @property
-    def nbytes(self) -> int:
-        """Return bytes held by the key and value buffers."""
-        if self.keys is None:
-            return 0
-        assert self.values is not None
-        return self.keys.nbytes + self.values.nbytes
-
-
-def dynamic_roll(x: mx.array, shifts: mx.array, axis: int) -> mx.array:
-    """Roll each row of ``x`` along ``axis`` by its own shift."""
-    n = x.shape[axis]
-    expand_shifts = (...,) + (None,) * (x.ndim - axis)
-    expand_indices = expand_shifts[:-1]
-    idx = (mx.arange(n)[expand_indices] - shifts[expand_shifts]) % n
-    rolled = mx.take_along_axis(x, idx, axis=axis)
-    return rolled
 
 
 class BatchKVCache(BaseCache):
@@ -1059,18 +911,6 @@ class BatchKVCache(BaseCache):
             return int(self.keys.shape[0])
         return int(self.left_padding.shape[0])
 
-    def is_single_row(self) -> bool:
-        """Report whether the batch has exactly one row."""
-        return self.batch_size == 1
-
-    @property
-    def nbytes(self) -> int:
-        """Return bytes held by the key and value buffers."""
-        if self.keys is None:
-            return 0
-        assert self.values is not None
-        return self.keys.nbytes + self.values.nbytes
-
 
 class BatchRotatingKVCache(BaseCache):
     """Batched rotating K/V with per-row offsets and left-padding metadata.
@@ -1081,10 +921,6 @@ class BatchRotatingKVCache(BaseCache):
     K/V, row offsets and left padding; rotation and cursor metadata are separate.
     Quantization is not implemented for this cache type.
     """
-
-    def memory_profile(self, token_count: int) -> CacheMemory:
-        """Profile the windowed batch buffers for allocation accounting."""
-        return _windowed_memory_profile(self, token_count)
 
     step = 256
 
@@ -1443,18 +1279,6 @@ class BatchRotatingKVCache(BaseCache):
             return int(self.keys.shape[0])
         return int(self.left_padding.shape[0])
 
-    def is_single_row(self) -> bool:
-        """Report whether the batch has exactly one row."""
-        return self.batch_size == 1
-
-    @property
-    def nbytes(self) -> int:
-        """Return bytes held by the key and value buffers."""
-        if self.keys is None:
-            return 0
-        assert self.values is not None
-        return self.keys.nbytes + self.values.nbytes
-
 
 # MLX-VLM cache extensions.
 
@@ -1697,10 +1521,6 @@ class BatchQuantizedKVCache(BaseCache):
             assert self.values is not None
             return int(self.keys[0].shape[0])
         return int(self.left_padding.shape[0])
-
-    def is_single_row(self) -> bool:
-        """Report whether the batch has exactly one row."""
-        return self.batch_size == 1
 
     def make_mask(
         self,
