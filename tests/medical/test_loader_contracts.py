@@ -25,9 +25,9 @@ def _checkpoint_config() -> JSONObject:
     text |= {"head_dim": 8, "rms_norm_eps": 1e-6, "query_pre_attn_scalar": 8}
     text["mm_tokens_per_image"] = 4
     vision: JSONObject = {**shared, "image_size": 4, "patch_size": 2}
-    return {"model_type": "gemma3", "text_config": text, "vision_config": vision} | {
-        "image_token_index": 63
-    }
+    config: JSONObject = {"model_type": "gemma3", "text_config": text}
+    config |= {"vision_config": vision, "image_token_index": 63}
+    return config
 
 
 def test_saved_native_checkpoint_preserves_parameters_and_logits(

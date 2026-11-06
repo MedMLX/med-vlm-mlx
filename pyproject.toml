@@ -99,7 +99,7 @@ include = ["src", "scripts", "tests", "typings", "environment"]
 pythonVersion = "3.13"
 stubPath = "typings"
 pythonPlatform = "Darwin"
-typeCheckingMode = "standard"
+typeCheckingMode = "strict"
 enableTypeIgnoreComments = false
 reportUnnecessaryTypeIgnoreComment = "error"
 
