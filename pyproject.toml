@@ -53,7 +53,7 @@ keywords = [
 
 [project.urls]
 Homepage = "https://medmlx.org"
-Documentation = "https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.3/README.md"
+Documentation = "https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.4/README.md"
 Repository = "https://github.com/MedMLX/med-vlm-mlx"
 Issues = "https://github.com/MedMLX/med-vlm-mlx/issues"
 Weights = "https://huggingface.co/mlx-community/medgemma-1.5-4b-it-4bit"

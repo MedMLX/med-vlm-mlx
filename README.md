@@ -6,7 +6,7 @@ Run MedGemma locally on Apple Silicon. Includes Python, CLI and HTTP interfaces.
 
 [![PyPI](https://img.shields.io/pypi/v/med-vlm-mlx)](https://pypi.org/project/med-vlm-mlx/)
 [![Python](https://img.shields.io/pypi/pyversions/med-vlm-mlx)](https://pypi.org/project/med-vlm-mlx/)
-[![License](https://img.shields.io/badge/License-MIT-yellow)](https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.3/LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.4/LICENSE)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97_Hugging_Face-MedGemma-yellow)](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-4bit)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
@@ -41,7 +41,7 @@ For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-wor
 ```bash
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install "med-vlm-mlx>=0.3.3"
+uv pip install "med-vlm-mlx>=0.3.4"
 ```
 
 Needs macOS on Apple Silicon with Metal and Python 3.13. The package
@@ -151,6 +151,6 @@ their turn in queue order.
 
 ## License
 
-MIT, with Apache-2.0 adaptations. See [LICENSE](https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.3/LICENSE) and [third-party notices](https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.3/THIRD_PARTY_NOTICES.md). MedGemma weights are subject to the [Health AI Developer Foundations terms](https://developers.google.com/health-ai-developer-foundations/terms).
+MIT, with Apache-2.0 adaptations. See [LICENSE](https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.4/LICENSE) and [third-party notices](https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.4/THIRD_PARTY_NOTICES.md). MedGemma weights are subject to the [Health AI Developer Foundations terms](https://developers.google.com/health-ai-developer-foundations/terms).
 
 For research and education. Outputs require human review.
