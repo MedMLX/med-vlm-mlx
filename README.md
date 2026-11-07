@@ -19,6 +19,8 @@ Run MedGemma locally on Apple Silicon. Includes Python, CLI and HTTP interfaces.
 | :--- | :--- |
 | Image + text prompt | Generated text |
 
+Weights: 3.4 GB (MedGemma 1.5 4B), 3.0 GB (MedGemma 4B) or 16.9 GB (MedGemma 27B) download. Peak MLX memory to describe a 1929×2207 chest radiograph in up to 256 tokens: 4.4 GB (MedGemma 1.5 4B), 4.1 GB (MedGemma 4B) and 17.9 GB (MedGemma 27B).
+
 ## Use with MedMLX
 
 The [MedMLX MCP server](https://github.com/MedMLX/medmlx/blob/main/docs/mcp.md) is the lowest-friction way to use MedGemma. MedMLX runs this package in its own isolated environment as the provisional `medgemma` model, so an AI agent can describe, check and run it for you. Pass a local MedGemma folder as `weights_path`; see the [bridge setup and limits](https://github.com/MedMLX/medmlx/blob/main/docs/medvlm-bridge.md).
