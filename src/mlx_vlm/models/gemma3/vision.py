@@ -105,7 +105,11 @@ class SigLipVisionModel(nn.Module):
         super().__init__()
         self.embeddings = VisionEmbeddings(config)
         self.encoder = Encoder(config)
-        self.post_layernorm = nn.LayerNorm(config.hidden_size)
+        # Transformers' SigLIP builds this norm with layer_norm_eps (1e-6 in MedGemma),
+        # not MLX's 1e-5 default.
+        self.post_layernorm = nn.LayerNorm(
+            config.hidden_size, eps=config.layer_norm_eps
+        )
 
     def __call__(
         self,
