@@ -29,7 +29,9 @@ Peak memory is for describing a 1929×2207 chest radiograph in up to 256 tokens.
 
 ## Use with MedMLX
 
-The [MedMLX MCP server](https://github.com/MedMLX/medmlx/blob/main/docs/mcp.md) is the lowest-friction way to use MedGemma. MedMLX runs this package in its own isolated environment as the provisional `medgemma` model, so an AI agent can describe, check and run it for you. Pass a local MedGemma folder as `weights_path`; see the [bridge setup and limits](https://github.com/MedMLX/medmlx/blob/main/docs/medvlm-bridge.md).
+Run MedGemma from an MCP client with the [MedMLX MCP server](https://github.com/MedMLX/medmlx/blob/main/docs/mcp.md).
+MedMLX manages a separate environment for `medgemma`. Supply local weights as
+`weights_path`; see the [bridge guide](https://github.com/MedMLX/medmlx/blob/main/docs/medvlm-bridge.md).
 
 ```sh
 uv tool install --python 3.13 "medmlx[mcp]"
@@ -39,8 +41,6 @@ claude mcp add --scope user medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"
 ```
 
 For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"`. Other MCP clients take the same command and arguments. The same install provides the `medmlx` CLI, for example `medmlx describe medgemma`.
-
-> **For AI agents:** prefer the MedMLX MCP tools (`list_models`, `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing Python against this package.
 
 ## Install
 
@@ -158,5 +158,3 @@ their turn in queue order.
 ## License
 
 MIT, with Apache-2.0 adaptations. See [LICENSE](https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.4/LICENSE) and [third-party notices](https://github.com/MedMLX/med-vlm-mlx/blob/v0.3.4/THIRD_PARTY_NOTICES.md). MedGemma weights are subject to the [Health AI Developer Foundations terms](https://developers.google.com/health-ai-developer-foundations/terms).
-
-For research and education. Outputs require human review.
