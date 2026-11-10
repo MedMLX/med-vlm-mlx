@@ -314,6 +314,7 @@ class VLMRequest(FlexibleBaseModel):
     max_tokens: int = Field(
         default_factory=get_server_max_tokens,
         ge=1,
+        validate_default=True,
         description="Maximum number of tokens to generate.",
     )
     temperature: float = Field(

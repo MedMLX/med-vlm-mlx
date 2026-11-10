@@ -65,6 +65,20 @@ def test_http_generation_requires_a_positive_token_limit(max_tokens: int) -> Non
         )
 
 
+@pytest.mark.parametrize("max_tokens", [0, -1])
+def test_http_generation_validates_default_token_limit(
+    monkeypatch: pytest.MonkeyPatch, max_tokens: int
+) -> None:
+    monkeypatch.setenv("MLX_VLM_MAX_TOKENS", str(max_tokens))
+    with pytest.raises(ValidationError, match="max_tokens"):
+        ChatRequest.model_validate(
+            {
+                "model": "medgemma",
+                "messages": [{"role": "user", "content": "Describe the image."}],
+            }
+        )
+
+
 def test_invalid_inline_image_error_redacts_source() -> None:
     source = "data:image/png;base64,cHJpdmF0ZS1pbWFnZS1ieXRlcw=="
     with pytest.raises(ValueError, match="Failed to load image") as error:
