@@ -65,6 +65,8 @@ def _reject_unsupported_items(value: object) -> None:
         return
     item = cast(dict[str, object], value)
     kind = item.get("type")
+    if kind is not None and not isinstance(kind, str):
+        raise ValueError("Content item type must be a string")
     if kind in _VIDEO_PART_TYPES:
         raise ValueError("Video inputs are outside the medical runtime")
     if kind in _AUDIO_PART_TYPES:

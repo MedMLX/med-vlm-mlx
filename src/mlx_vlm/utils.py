@@ -359,8 +359,9 @@ def load_model(
         nn.Module: The loaded and initialized model.
 
     Raises:
-        FileNotFoundError: If the weight files (.safetensors) are not found.
-        ValueError: If the model class or args class are not found or cannot be instantiated.
+        FileNotFoundError: If a weight file is missing, including a declared shard.
+        ValueError: If the config or shard index is malformed, a shard path is
+            absolute or parent-relative, or model initialization fails.
     """
     options = _native_checkpoint_options(kwargs)
     strict = options.pop("strict", True)
@@ -370,33 +371,33 @@ def load_model(
     get_model_and_args(config=config, model_path=model_path)
 
     index_file = model_path / "model.safetensors.index.json"
-    weight_files = []
+    weight_files: list[str] = []
     declared_keys: set[str] = set()
     if index_file.exists():
-        try:
-            with open(index_file) as f:
-                index: object = json.load(f)
-            if not is_json_object(index):
-                raise ValueError("Safetensors index must contain a JSON object")
-            weight_map = index.get("weight_map", {})
-            if not isinstance(weight_map, dict) or not all(
-                isinstance(value, str) for value in weight_map.values()
-            ):
-                raise ValueError(
-                    "Safetensors weight_map must map tensor names to shard filenames"
-                )
-            declared_keys = set(weight_map)
-            weight_files = [
-                str(model_path / shard)
-                for shard in sorted(
-                    {value for value in weight_map.values() if isinstance(value, str)}
-                )
-                if (model_path / shard).exists()
-            ]
-        except (ValueError, OSError):
-            weight_files = []
-            declared_keys = set()
-    if not weight_files:
+        # An index is authoritative: falling back to loose files can silently
+        # load a different checkpoint after an interrupted download or bad edit.
+        with open(index_file, encoding="utf-8") as f:
+            index: object = json.load(f)
+        if not is_json_object(index):
+            raise ValueError("Safetensors index must contain a JSON object")
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map or not all(
+            isinstance(value, str) and value for value in weight_map.values()
+        ):
+            raise ValueError(
+                "Safetensors weight_map must map tensor names to shard filenames"
+            )
+        declared_keys = set(weight_map)
+        for shard in sorted({value for value in weight_map.values() if isinstance(value, str)}):
+            relative = Path(shard)
+            if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".safetensors":
+                raise ValueError("Safetensors shards must be relative .safetensors paths")
+            path = model_path / relative
+            if not path.is_file():
+                raise FileNotFoundError(f"Missing safetensors shard: {path}")
+            # Hub snapshots legitimately link shard files to their blob cache.
+            weight_files.append(str(path))
+    else:
         weight_files = [
             wf
             for wf in glob.glob(str(model_path / "*.safetensors"))

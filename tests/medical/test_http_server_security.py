@@ -103,3 +103,20 @@ def test_non_loopback_bind_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> 
     )
     monkeypatch.setenv("MLX_VLM_SERVER_API_KEY", "secret")
     assert parse_arguments(["--host", "::"]).host == "::"
+
+
+@pytest.mark.parametrize("kind", [[], {}])
+def test_malformed_content_type_returns_validation_error(kind: object) -> None:
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.post("/v1/chat/completions", json={
+            "model": "medgemma",
+            "messages": [{"role": "user", "content": [{"type": kind, "text": "hello"}]}],
+        })
+    assert response.status_code == 422
+
+
+def test_non_ascii_authorization_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MLX_VLM_SERVER_API_KEY", "secret")
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/v1/models", headers={b"Authorization": b"Bearer \xff"})
+    assert response.status_code == 401

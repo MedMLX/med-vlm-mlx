@@ -43,6 +43,10 @@ def test_saved_native_checkpoint_preserves_parameters_and_logits(
     evaluate(expected)
     save_weights(tmp_path, model)
     (tmp_path / "config.json").write_text(json.dumps(config))
+    # Hub snapshot files are symlinks to extensionless blobs outside the snapshot.
+    blob = tmp_path / "cached-blob"
+    (tmp_path / "model.safetensors").rename(blob)
+    (tmp_path / "model.safetensors").symlink_to(blob)
     restored = load_model(tmp_path)
     assert type(restored) is type(model)
     assert asdict(restored.config) == asdict(model.config)
@@ -64,3 +68,35 @@ def test_strict_load_rejects_missing_medical_weights(tmp_path: Path) -> None:
     save_safetensors(str(tmp_path / "model.safetensors"), weights)
     with pytest.raises(ValueError):
         load_model(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "case", ["invalid-json", "non-object", "empty", "non-string", "missing", "parent", "absolute"],
+)
+def test_invalid_shard_index_never_loads_loose_or_external_weights(
+    tmp_path: Path, case: str,
+) -> None:
+    config = _checkpoint_config()
+    model = GemmaModel(GemmaConfig.from_dict(config))
+    folder = tmp_path / "model"
+    folder.mkdir()
+    save_weights(folder, model)
+    (folder / "config.json").write_text(json.dumps(config))
+    external = tmp_path / "external.safetensors"
+    save_safetensors(str(external), dict(tree_flatten(model.parameters())))
+    payloads: dict[str, object] = {
+        "non-object": [], "empty": {"weight_map": {}},
+        "non-string": {"weight_map": {"weight": 1}},
+        "missing": {"weight_map": {"weight": "missing.safetensors"}},
+        "parent": {"weight_map": {"weight": "../external.safetensors"}},
+        "absolute": {"weight_map": {"weight": str(external)}},
+    }
+    (folder / "model.safetensors.index.json").write_text(
+        "{" if case == "invalid-json" else json.dumps(payloads[case])
+    )
+    if case == "missing":
+        with pytest.raises(FileNotFoundError):
+            load_model(folder)
+    else:
+        with pytest.raises(ValueError):
+            load_model(folder)

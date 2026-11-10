@@ -67,7 +67,8 @@ def _require_management_api_key(request: HTTPConnection) -> None:
 
     expected = f"Bearer {api_key}"
     supplied = request.headers.get("Authorization", "")
-    if not secrets.compare_digest(supplied, expected):
+    # Byte comparison also rejects malformed non-ASCII headers without a 500.
+    if not secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(
             status_code=401,
             detail="Invalid API key",
