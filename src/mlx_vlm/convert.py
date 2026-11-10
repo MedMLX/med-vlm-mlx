@@ -52,10 +52,13 @@ def mixed_quant_predicate_builder(
 ) -> Callable[[str, nn.Module], Union[bool, QuantizationOptions]]:
     """Build a mixed-bit quantization predicate for a named recipe.
 
-    Recipes pair ``(low_bits, high_bits)`` at group size 64. Modules outside the
-    indexed decoder layers stay unquantized, and the first and last eighth of
-    the layers, every third layer after the first eighth, plus ``v_proj``,
-    ``down_proj``, ``lm_head`` and ``embed_tokens`` receive the high bit width.
+    Recipes pair ``(low_bits, high_bits)`` at group size 64. Multimodal modules,
+    modules without ``to_quantized`` and weights whose input width is not a
+    multiple of 64 stay unquantized. ``lm_head`` and ``embed_tokens`` get the
+    high bit width, as do ``v_proj`` and ``down_proj`` in the first and last
+    eighth of the decoder layers and in every third layer after the first
+    eighth; every other module gets the low bit width. Paths without a layer
+    index count as layer 0.
     """
     group_size = 64
 

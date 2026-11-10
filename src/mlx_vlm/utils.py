@@ -1040,7 +1040,12 @@ def prepare_inputs(
         prompts: One prompt or a list of prompts.
         image_token_index: Unused; accepted for call compatibility.
         resize_shape: Optional ``(width, height)`` bound for each image.
+        add_special_tokens: Let the tokenizer add its special tokens.
+        padding: Pad prompts to a common length.
+        padding_side: ``"left"`` (default) or ``"right"``.
         pad_to_uniform_size: Give all PIL images one shape (see above).
+        return_tensors: Tensor type requested from the processor before the
+            outputs are converted to MLX arrays.
 
     Returns:
         Processor outputs as MLX arrays: ``input_ids`` and ``attention_mask`` and,

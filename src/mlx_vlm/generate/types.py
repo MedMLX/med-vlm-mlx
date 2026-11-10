@@ -180,6 +180,7 @@ def is_per_row_logits_processor_list(
         | list[list[Callable[[mx.array, mx.array], mx.array]] | None]
     ),
 ) -> TypeIs[list[list[Callable[[mx.array, mx.array], mx.array]] | None]]:
+    """Distinguish a list of per-row callback lists from shared callbacks."""
     return all(value is None or isinstance(value, list) for value in values)
 
 
