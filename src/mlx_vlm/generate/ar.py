@@ -60,6 +60,7 @@ from mlx_vlm.generate.common import (
     default_prefill_step_size_for_offload,
     generation_stream,
     maybe_quantize_kv_cache,
+    plan_prefill_chunks,
     wired_limit,
 )
 from mlx_vlm.generate.types import (
@@ -424,7 +425,11 @@ def generate_step(
         # explicit caller metadata takes precedence over their derived values.
         explicit_prompt_metadata = {
             key: kwargs[key]
-            for key in ("attention_mask_4d",)
+            for key in (
+                "attention_mask_4d",
+                "prompt_key_validity",
+                "prompt_image_blocks",
+            )
             if kwargs.get(key) is not None
         }
         # Get input embeddings (handles both multimodal and text-only)
@@ -445,6 +450,11 @@ def generate_step(
             }
         )
         kwargs.update(explicit_prompt_metadata)
+        if explicit_prompt_metadata.get("attention_mask_4d") is not None:
+            # An explicit dense mask replaces the embedding helper's compact
+            # metadata, preserving the existing caller-supplied mask interface.
+            kwargs.pop("prompt_key_validity", None)
+            kwargs.pop("prompt_image_blocks", None)
         policy_kwargs = kwargs
         prefill_step_size = default_prefill_step_size_for_offload(
             model, prefill_step_size, DEFAULT_PREFILL_STEP_SIZE
@@ -462,14 +472,20 @@ def generate_step(
         # never evaluated; the unchunked path feeds the whole prompt to _step,
         # which reads logits[:, -1, :] and so materializes every row. Gating on
         # prefill_step_size made short prompts peak higher than long ones.
-        if prefill_step_size is not None and inputs_embeds.shape[1] > 1:
+        prefill_sizes = plan_prefill_chunks(
+            model,
+            step_size=prefill_step_size,
+            sequence_length=inputs_embeds.shape[1],
+            prompt_cache=prompt_cache,
+            prefill_kwargs=kwargs,
+        )
+        if prefill_sizes:
             # Chunked prefill with embeddings
             total_tokens = inputs_embeds.shape[1]
             with tqdm(
                 total=total_tokens, desc="Prefill", unit="tok", disable=not verbose
             ) as pbar:
-                while inputs_embeds.shape[1] > 1:
-                    n_to_process = min(prefill_step_size, inputs_embeds.shape[1] - 1)
+                for n_to_process in prefill_sizes:
                     chunk_kwargs = {
                         **kwargs,
                         "logits_to_keep": 1,
@@ -488,8 +504,6 @@ def generate_step(
                     input_ids = input_ids[:, n_to_process:]
                     mx.clear_cache()
                     pbar.update(n_to_process)
-
-            input_ids = input_ids[:, -1:]
 
         y, logprobs = _step(input_ids, inputs_embeds=inputs_embeds)
 
@@ -531,6 +545,7 @@ def _left_pad_prompts(prompts: list[list[int]], max_length: int | None = None):
 
 
 _SEQUENCE_ALIGNED_PROMPT_KWARGS = {"attention_mask", "token_type_ids"}
+_COMPACT_PROMPT_KWARGS = {"prompt_key_validity", "prompt_image_blocks"}
 
 
 def _prompt_kwarg_batch_size(key: str, v: mx.array) -> int:
@@ -636,6 +651,9 @@ def _unpad_batch_prompts(
             if key == "attention_mask_4d":
                 kwargs[key] = value[:, :, start:stop, start:stop]
                 continue
+            if key in _COMPACT_PROMPT_KWARGS:
+                kwargs[key] = value[:, start:stop]
+                continue
             if key == "inputs_embeds":
                 sequence_aligned = value.ndim >= 2 and value.shape[1] == sequence_length
             else:
@@ -735,6 +753,10 @@ def _merge_prefill_prompt_kwargs(
                 row_v = _prompt_kwarg_row(k, v, i, batch_size)
                 if k == "attention_mask_4d":
                     row_v = _pad_prompt_attention_mask(row_v, max_length - length, 0)
+                elif k in _COMPACT_PROMPT_KWARGS:
+                    row_v = _pad_sequence_aligned_prompt_kwarg(
+                        k, row_v, max_length, left=True
+                    )
                 elif _is_sequence_aligned_prompt_kwarg(k, row_v, length):
                     row_v = _pad_sequence_aligned_prompt_kwarg(
                         k, row_v, max_length, left=True
@@ -1522,6 +1544,14 @@ class PromptProcessingBatch:
                 prefill_kwargs=policy_kwargs,
             ):
                 self.prefill_step_size = None
+        self._prefill_sizes = plan_prefill_chunks(
+            self.model,
+            step_size=self.prefill_step_size,
+            sequence_length=self._inputs_embeds.shape[1],
+            prompt_cache=self.prompt_cache,
+            prefill_kwargs=self._prompt_kwargs,
+        )
+        self._prefill_index = 0
 
     def __len__(self):
         """Return the number of prompts in this prefill group."""
@@ -1529,11 +1559,9 @@ class PromptProcessingBatch:
 
     def needs_processing(self):
         """True if prompt needs chunked processing before generate()."""
-        if self.prefill_step_size is None:
-            return False
         # See the note in stream_generate: prompts at or below prefill_step_size
         # would otherwise skip chunking and materialize the full logits tensor.
-        return self._inputs_embeds.shape[1] > 1
+        return self._prefill_index < len(self._prefill_sizes)
 
     def _prompt_kwargs_for_step(self, n: Optional[int] = None) -> PromptInputs:
         if n is None or not self._prompt_length_aware_keys:
@@ -1550,10 +1578,7 @@ class PromptProcessingBatch:
         if not self.needs_processing():
             return 0
 
-        step = self.prefill_step_size or self._inputs_embeds.shape[1]
-        n = min(step, self._inputs_embeds.shape[1] - 1)
-        if n <= 0:
-            return 0
+        n = self._prefill_sizes[self._prefill_index]
         prompt_kwargs = {
             **self._prompt_kwargs_for_step(n),
         }
@@ -1565,6 +1590,7 @@ class PromptProcessingBatch:
             **prompt_kwargs,
         )
         async_evaluate([c.state for c in self.prompt_cache])
+        self._prefill_index += 1
         self._inputs_embeds = self._inputs_embeds[:, n:]
         self._input_ids = self._input_ids[:, n:]
         for k in self._prompt_length_aware_keys:

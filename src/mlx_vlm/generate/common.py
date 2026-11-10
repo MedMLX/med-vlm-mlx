@@ -47,6 +47,51 @@ class _ChunkedPrefillPolicy(Protocol):
     ) -> object: ...
 
 
+class _PrefillChunkSizes(Protocol):
+    def __call__(
+        self,
+        *,
+        step_size: int,
+        sequence_length: int,
+        prompt_cache: Sequence[CacheComponent] | None,
+        prefill_kwargs: Mapping[str, ModelArgument],
+    ) -> list[int]: ...
+
+
+def plan_prefill_chunks(
+    model: object,
+    *,
+    step_size: int | None,
+    sequence_length: int,
+    prompt_cache: Sequence[CacheComponent] | None,
+    prefill_kwargs: Mapping[str, ModelArgument],
+) -> list[int]:
+    """Plan cache-only chunks, leaving the final complete block for generation.
+
+    Models with bidirectional blocks may extend a proposed cut to include all
+    block keys. Other models leave one final token after ordinary fixed-size chunks.
+    """
+    if step_size is None:
+        return []
+    if step_size <= 0:
+        raise ValueError("prefill_step_size must be positive or None")
+    language_model = getattr(model, "language_model", model)
+    planner = getattr(language_model, "prefill_chunk_sizes", None)
+    if callable(planner):
+        return cast(_PrefillChunkSizes, planner)(
+            step_size=step_size,
+            sequence_length=sequence_length,
+            prompt_cache=prompt_cache,
+            prefill_kwargs=prefill_kwargs,
+        )
+    sizes: list[int] = []
+    while sequence_length > 1:
+        size = min(step_size, sequence_length - 1)
+        sizes.append(size)
+        sequence_length -= size
+    return sizes
+
+
 @runtime_checkable
 class _QuantizableCache(Protocol):
     offset: int
@@ -93,9 +138,9 @@ def chunked_prefill_enabled(
     """Return whether prompt prefill may be split into ``prefill_step_size`` chunks.
 
     The first object with a callable ``chunked_prefill_policy`` (the model, then
-    its language model) decides. Gemma3 uses this to keep prompts that contain
-    image blocks whole, because a chunk boundary inside a bidirectional image
-    block leaves its earlier queries without the later keys of that block.
+    its language model) decides. Gemma3 permits image-aligned compact prompts
+    and keeps explicit dense bidirectional masks whole. A boundary inside an
+    image block would leave its earlier queries without the later block keys.
     Otherwise a truthy ``no_chunked_prefill`` attribute disables chunking, and
     the default is to chunk.
     """

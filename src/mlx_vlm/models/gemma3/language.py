@@ -2,12 +2,12 @@
 
 from collections.abc import Mapping, Sequence
 from functools import partial
-from typing import Optional
+from typing import Optional, cast
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.contracts import AttentionCache, ModelArgument
+from mlx_vlm.contracts import AttentionCache, CacheComponent, ModelArgument
 from mlx_vlm.models.base import (
     LanguageModelOutput,
     create_attention_mask,
@@ -15,7 +15,11 @@ from mlx_vlm.models.base import (
     scaled_dot_product_attention,
 )
 from mlx_vlm.models.cache import BatchRotatingKVCache, KVCache, RotatingKVCache
-from mlx_vlm.models.gemma3.attention import cached_attention_mask, prompt_position
+from mlx_vlm.models.gemma3.attention import (
+    cached_attention_mask,
+    image_aligned_prefill_sizes,
+    prompt_position,
+)
 from mlx_vlm.models.gemma3.config import TextConfig
 from mlx_vlm.models.rope_utils import initialize_rope
 
@@ -91,6 +95,7 @@ class Attention(nn.Module):
         mask: mx.array | str | None = None,
         cache: AttentionCache | None = None,
         prompt_mask: mx.array | None = None,
+        image_blocks: mx.array | None = None,
     ) -> mx.array:
         """Attend over ``x`` of shape ``(batch, length, hidden)``.
 
@@ -100,9 +105,9 @@ class Attention(nn.Module):
                 ``prompt_mask`` is ``None``. An array is trimmed to the last
                 ``key_len`` columns.
             cache: Layer KV cache. RoPE positions start at ``cache.offset``.
-            prompt_mask: Boolean ``(batch, 1, prompt, prompt)`` image/padding
-                mask. When given it replaces ``mask``: the slice for this step
-                is built with ``cached_attention_mask`` and this layer's window.
+            prompt_mask: Dense prompt mask or compact key validity. When given
+                it replaces ``mask``; this layer builds only its Q-by-K slice.
+            image_blocks: Compact image IDs paired with two-dimensional validity.
 
         Raises:
             ValueError: If ``prompt_mask`` is combined with a rotating cache that
@@ -158,6 +163,7 @@ class Attention(nn.Module):
                 kv_sequence_length(keys),
                 self.window_size,
                 rotation,
+                image_blocks=image_blocks,
             )
         elif isinstance(mask, mx.array):
             key_len = kv_sequence_length(keys)
@@ -238,6 +244,7 @@ class TransformerBlock(nn.Module):
         mask: mx.array | str | None = None,
         cache: KVCache | RotatingKVCache | AttentionCache | None = None,
         prompt_mask: mx.array | None = None,
+        image_blocks: mx.array | None = None,
     ) -> mx.array:
         """Apply the attention and MLP residual blocks to ``x``.
 
@@ -249,7 +256,9 @@ class TransformerBlock(nn.Module):
         x = clip_residual(x)
 
         # Self-attention block
-        r = self.self_attn(self.input_layernorm(x), mask, cache, prompt_mask)
+        r = self.self_attn(
+            self.input_layernorm(x), mask, cache, prompt_mask, image_blocks
+        )
         h = self.post_attention_layernorm(r)
 
         # Add residual connection with overflow protection for float16
@@ -297,6 +306,8 @@ class Gemma3Model(nn.Module):
         mask: mx.array | None = None,
         cache: Sequence[AttentionCache | None] | None = None,
         attention_mask_4d: mx.array | None = None,
+        prompt_key_validity: mx.array | None = None,
+        prompt_image_blocks: mx.array | None = None,
     ):
         """Run the decoder and return normalized hidden states.
 
@@ -314,6 +325,10 @@ class Gemma3Model(nn.Module):
             attention_mask_4d: Boolean ``(batch, 1, prompt, prompt)`` prompt
                 mask from ``image_attention_mask``; each layer slices it for the
                 current cache window.
+            prompt_key_validity: Compact boolean ``(batch, prompt)`` key validity.
+            prompt_image_blocks: Compact int32 IDs, positive within image blocks
+                and zero for text. Supply both compact arrays together, without
+                ``attention_mask_4d``.
 
         Returns:
             Hidden states of shape ``(batch, length, hidden)``.
@@ -327,6 +342,30 @@ class Gemma3Model(nn.Module):
         """
         if cache is not None and len(cache) != len(self.layers):
             raise ValueError("Gemma cache count must match the layer count")
+        if (prompt_key_validity is None) != (prompt_image_blocks is None):
+            raise ValueError(
+                "Gemma compact attention requires validity and image blocks together"
+            )
+        if attention_mask_4d is not None and prompt_key_validity is not None:
+            raise ValueError(
+                "Provide dense or compact Gemma prompt attention, not both"
+            )
+        if (
+            prompt_key_validity is not None
+            and prompt_image_blocks is not None
+            and (
+                prompt_key_validity.ndim != 2
+                or prompt_key_validity.dtype != mx.bool_
+                or prompt_image_blocks.shape != prompt_key_validity.shape
+                or prompt_image_blocks.dtype != mx.int32
+            )
+        ):
+            raise ValueError(
+                "Gemma compact attention requires matching boolean/int32 [batch, prompt] metadata"
+            )
+        prompt_mask = (
+            attention_mask_4d if attention_mask_4d is not None else prompt_key_validity
+        )
         embedded_tokens = inputs_embeds is None
         if inputs_embeds is None:
             h = self.embed_tokens(inputs)
@@ -339,24 +378,40 @@ class Gemma3Model(nn.Module):
         if cache is None:
             cache = [None] * len(self.layers)
 
-        if attention_mask_4d is not None and inputs_embeds is not None:
+        if prompt_mask is not None and inputs_embeds is not None:
             # A True entry right of this step's last key means a query here would
             # need a later key of its image block, which does not exist yet:
             # the step boundary splits that block.
             offset = prompt_position(cache[0] if cache else None)
             end = offset + h.shape[1]
-            if end > attention_mask_4d.shape[-1]:
+            if end > prompt_mask.shape[-1]:
                 raise ValueError(
                     "Gemma prefill mask must cover the complete cached prompt"
                 )
-            if bool(mx.any(attention_mask_4d[:, :, offset:end, end:]).item()):
+            if prompt_image_blocks is not None and end < prompt_image_blocks.shape[1]:
+                splits_image = bool(
+                    mx.any(
+                        (prompt_image_blocks[:, end - 1] > 0)
+                        & (
+                            prompt_image_blocks[:, end - 1]
+                            == prompt_image_blocks[:, end]
+                        )
+                    ).item()
+                )
+            elif attention_mask_4d is not None:
+                splits_image = bool(
+                    mx.any(attention_mask_4d[:, :, offset:end, end:]).item()
+                )
+            else:
+                splits_image = False
+            if splits_image:
                 raise ValueError(
                     "Gemma prefill boundary splits a bidirectional image block"
                 )
-        if mask is not None and attention_mask_4d is not None:
+        if mask is not None and prompt_mask is not None:
             raise ValueError("Provide either mask or attention_mask_4d, not both")
         global_mask = sliding_window_mask = None
-        if mask is None and attention_mask_4d is None:
+        if mask is None and prompt_mask is None:
             global_cache = next(
                 (
                     c
@@ -384,12 +439,12 @@ class Gemma3Model(nn.Module):
             )
 
             local_mask = mask
-            if mask is None and attention_mask_4d is None and is_global:
+            if mask is None and prompt_mask is None and is_global:
                 local_mask = global_mask
-            elif mask is None and attention_mask_4d is None:
+            elif mask is None and prompt_mask is None:
                 local_mask = sliding_window_mask
 
-            h = layer(h, local_mask, c, attention_mask_4d)
+            h = layer(h, local_mask, c, prompt_mask, prompt_image_blocks)
 
         return self.norm(h)
 
@@ -411,11 +466,11 @@ class LanguageModel(nn.Module):
         prefill_kwargs: Mapping[str, ModelArgument] | None = None,
         **kwargs: object,
     ) -> bool:
-        """Keep prepared bidirectional image masks intact in decoder-only batches.
+        """Allow aligned compact prompts; keep explicit bidirectional masks whole.
 
         The HTTP batcher receives this decoder without the outer vision model's
         policy. Future-visible entries identify image blocks in its prepared mask.
-        Text-only causal masks can still use the requested prefill chunk size.
+        Compact prompts use ``prefill_chunk_sizes`` to align image boundaries.
         """
         mask = (prefill_kwargs or {}).get("attention_mask_4d")
         if mask is not None and not isinstance(mask, mx.array):
@@ -425,6 +480,22 @@ class LanguageModel(nn.Module):
         )
         return not has_image_blocks
 
+    def prefill_chunk_sizes(
+        self,
+        *,
+        step_size: int,
+        sequence_length: int,
+        prompt_cache: Sequence[CacheComponent] | None,
+        prefill_kwargs: Mapping[str, ModelArgument],
+    ) -> list[int]:
+        """Keep every row's bidirectional image block in one prefill forward."""
+        blocks = prefill_kwargs.get("prompt_image_blocks")
+        if blocks is not None and not isinstance(blocks, mx.array):
+            raise TypeError("Gemma image blocks must be an MLX array")
+        first_cache = prompt_cache[0] if prompt_cache else None
+        offset = prompt_position(cast(AttentionCache | None, first_cache))
+        return image_aligned_prefill_sizes(blocks, offset, sequence_length, step_size)
+
     def __call__(
         self,
         inputs: mx.array,
@@ -432,6 +503,8 @@ class LanguageModel(nn.Module):
         mask: mx.array | None = None,
         cache: Sequence[AttentionCache | None] | None = None,
         attention_mask_4d: mx.array | None = None,
+        prompt_key_validity: mx.array | None = None,
+        prompt_image_blocks: mx.array | None = None,
         **kwargs: ModelArgument,
     ):
         """Run the decoder and project hidden states to vocabulary logits."""
@@ -441,6 +514,8 @@ class LanguageModel(nn.Module):
             mask=mask,
             cache=cache,
             attention_mask_4d=attention_mask_4d,
+            prompt_key_validity=prompt_key_validity,
+            prompt_image_blocks=prompt_image_blocks,
         )
         out = self.lm_head(out)
         return LanguageModelOutput(logits=out)

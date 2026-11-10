@@ -2,7 +2,7 @@
 
 import mlx.core as mx
 
-from mlx_vlm.contracts import AttentionCache, parse_int
+from mlx_vlm.contracts import AttentionCache, array_int_rows, parse_int
 from mlx_vlm.models.cache import BatchRotatingKVCache
 
 
@@ -26,28 +26,15 @@ def prompt_position(cache: AttentionCache | None) -> int:
     return position
 
 
-def image_attention_mask(
+def image_attention_metadata(
     input_ids: mx.array, padding_mask: mx.array | None, image_token_id: int
-) -> mx.array:
-    """Build the prompt visibility mask: causal text, bidirectional image blocks.
+) -> tuple[mx.array, mx.array]:
+    """Return linear-size key validity and image-block IDs for a complete prompt.
 
-    A query may attend to a key at or before its own position, or to any key in
-    its own image block. A block is a maximal run of consecutive
-    ``image_token_id`` tokens; images that are not separated by another token
-    (Gemma wraps each image in begin/end markers) would merge into one block.
-    Padded keys are never visible. Padded query rows are not masked out, so
-    callers must ignore their outputs.
-
-    Args:
-        input_ids: Token IDs with shape ``(batch, sequence)``; ``sequence > 0``.
-        padding_mask: ``(batch, sequence)`` array of 0/1 or bool, where 0 marks
-            a padded position. ``None`` means no padding.
-        image_token_id: Placeholder ID that fills every image block.
-
-    Returns:
-        Boolean array of shape ``(batch, 1, sequence, sequence)`` indexed
-        ``[batch, 0, query, key]``; ``True`` means the query may attend to the
-        key. The singleton axis broadcasts over attention heads.
+    Both arrays have shape ``(batch, sequence)``. Validity is boolean; int32 block
+    IDs are positive for each maximal placeholder run and zero for text. Two
+    images need a separating token to form distinct blocks, as Gemma's image
+    begin/end markers provide. Padding hides keys, not query rows.
 
     Raises:
         ValueError: If ``input_ids`` is not 2-D with a nonempty sequence, the padding
@@ -64,14 +51,51 @@ def image_attention_mask(
     is_image = input_ids == image_token_id
     previous = mx.pad(is_image[:, :-1], [(0, 0), (1, 0)])
     blocks = mx.cumsum((is_image & ~previous).astype(mx.int32), axis=1)
-    same_image = (
-        is_image[:, :, None]
-        & is_image[:, None, :]
-        & (blocks[:, :, None] == blocks[:, None, :])
-    )
-    positions = mx.arange(input_ids.shape[1])
-    causal = positions[:, None] >= positions[None, :]
-    return ((causal | same_image) & padding_mask[:, None, :].astype(mx.bool_))[:, None]
+    return padding_mask.astype(mx.bool_), mx.where(is_image, blocks, 0)
+
+
+def image_attention_mask(
+    input_ids: mx.array, padding_mask: mx.array | None, image_token_id: int
+) -> mx.array:
+    """Materialize the full causal-text/bidirectional-image mask for explicit callers.
+
+    The model carries :func:`image_attention_metadata` instead. This dense helper
+    retains the ``(batch, 1, sequence, sequence)`` mask interface.
+    """
+    validity, blocks = image_attention_metadata(input_ids, padding_mask, image_token_id)
+    length = input_ids.shape[1]
+    return cached_attention_mask(validity, 0, length, length, image_blocks=blocks)
+
+
+def image_aligned_prefill_sizes(
+    blocks: mx.array | None, offset: int, length: int, step_size: int
+) -> list[int]:
+    """Plan bounded chunks, extending a cut until every row's image block ends.
+
+    The final chunk remains for first-token generation, including a whole image
+    block when the prompt ends in one. Metadata crosses to host once per plan;
+    no token-by-token synchronization or square mask is needed for scheduling.
+    """
+    boundaries = [True] * (offset + length + 1)
+    for row in array_int_rows(blocks) if blocks is not None else []:
+        for position in range(1, len(row)):
+            if (
+                position < len(boundaries)
+                and row[position] > 0
+                and row[position] == row[position - 1]
+            ):
+                boundaries[position] = False
+    sizes: list[int] = []
+    end = offset + length
+    while offset < end - 1:
+        stop = min(offset + step_size, end - 1)
+        while stop < end and not boundaries[stop]:
+            stop += 1
+        if stop == end:
+            break
+        sizes.append(stop - offset)
+        offset = stop
+    return sizes
 
 
 def cached_attention_mask(
@@ -81,6 +105,8 @@ def cached_attention_mask(
     key_length: int,
     window_size: int | None = None,
     rotation: int = 0,
+    *,
+    image_blocks: mx.array | None = None,
 ) -> mx.array:
     """Slice the prompt mask for a cached forward step and extend it past the prompt.
 
@@ -90,11 +116,11 @@ def cached_attention_mask(
     Pairs inside the prompt use ``prompt_mask`` (so image blocks stay
     bidirectional during chunked or cached prefill). A query past the prompt
     attends causally to every earlier key whose prompt position was not padded,
-    read from the final prompt row, and to all generated keys.
+    read from complete prompt metadata, and to all generated keys.
 
     Args:
-        prompt_mask: Boolean ``(batch, 1, prompt, prompt)`` mask from
-            :func:`image_attention_mask`.
+        prompt_mask: Boolean ``(batch, prompt)`` key validity when ``image_blocks``
+            is supplied, otherwise an explicit ``(batch, 1, prompt, prompt)`` mask.
         query_offset: Absolute position of the first query token.
         query_length: Number of query tokens in this step.
         key_length: Number of keys returned by the cache; they end at the last
@@ -106,6 +132,7 @@ def cached_attention_mask(
         rotation: Number of slots to roll the key axis by, so columns follow the
             ring-buffer slot order of a full rotating cache during single-token
             decoding. ``0`` for caches stored in temporal order.
+        image_blocks: Int32 ``(batch, prompt)`` IDs from ``image_attention_metadata``.
 
     Returns:
         Boolean array of shape ``(batch, 1, query_length, key_length)``.
@@ -115,15 +142,29 @@ def cached_attention_mask(
     validated here; negative key indices follow MLX indexing semantics.
 
     Raises:
-        ValueError: If ``prompt_mask`` is not a 4-D boolean array of shape
-            ``(batch, 1, length, length)`` with ``length > 0``.
+        ValueError: If dense or compact metadata has an incompatible shape/dtype.
     """
-    if prompt_mask.dtype != mx.bool_ or prompt_mask.ndim != 4:
+    if image_blocks is not None:
+        if (
+            prompt_mask.dtype != mx.bool_
+            or prompt_mask.ndim != 2
+            or image_blocks.shape != prompt_mask.shape
+            or image_blocks.dtype != mx.int32
+            or prompt_mask.shape[1] == 0
+        ):
+            raise ValueError(
+                "Gemma compact attention requires matching boolean/int32 [batch, prompt] metadata"
+            )
+        prompt_length = prompt_mask.shape[1]
+    elif prompt_mask.dtype != mx.bool_ or prompt_mask.ndim != 4:
         raise ValueError(
             "Gemma prompt attention must be a four-dimensional boolean mask"
         )
-    prompt_length = prompt_mask.shape[-1]
-    if prompt_length == 0 or prompt_mask.shape[1:3] != (1, prompt_length):
+    else:
+        prompt_length = prompt_mask.shape[-1]
+    if image_blocks is None and (
+        prompt_length == 0 or prompt_mask.shape[1:3] != (1, prompt_length)
+    ):
         raise ValueError(
             "Gemma prompt attention must have shape [batch, 1, length, length]"
         )
@@ -132,11 +173,18 @@ def cached_attention_mask(
     keys = mx.arange(end - key_length, end)
     prompt_queries = mx.minimum(queries, prompt_length - 1)
     prompt_keys = mx.minimum(keys, prompt_length - 1)
-    original = prompt_mask[:, :, prompt_queries[:, None], prompt_keys[None, :]]
-    key_valid = (keys >= prompt_length) | prompt_mask[:, :, -1:, prompt_keys]
     causal = queries[:, None] >= keys[None, :]
     in_prompt = (queries[:, None] < prompt_length) & (keys[None, :] < prompt_length)
-    mask = mx.where(in_prompt, original, causal & key_valid)
+    if image_blocks is None:
+        original = prompt_mask[:, :, prompt_queries[:, None], prompt_keys[None, :]]
+        key_valid = (keys >= prompt_length) | prompt_mask[:, :, -1:, prompt_keys]
+        mask = mx.where(in_prompt, original, causal & key_valid)
+    else:
+        query_blocks = image_blocks[:, prompt_queries, None]
+        key_blocks = image_blocks[:, None, prompt_keys]
+        same_image = (query_blocks > 0) & (query_blocks == key_blocks) & in_prompt
+        key_valid = (keys >= prompt_length) | prompt_mask[:, prompt_keys]
+        mask = ((causal | same_image) & key_valid[:, None, :])[:, None]
     if window_size is not None:
         mask &= keys[None, :] > queries[:, None] - window_size
     if rotation:

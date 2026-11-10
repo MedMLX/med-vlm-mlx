@@ -1469,7 +1469,6 @@ class ResponseGenerator:
             and images is not None
         ):
             data_kwargs["vision_cache"] = self.vision_cache
-            data_kwargs["_image_key"] = images
 
         # Always call get_input_embeddings — BatchGenerator requires inputs_embeds
         embed = self.model.get_input_embeddings(
@@ -1477,7 +1476,6 @@ class ResponseGenerator:
         )
         # Remove cache kwargs before passing to BatchGenerator
         data_kwargs.pop("vision_cache", None)
-        data_kwargs.pop("_image_key", None)
         gen_kwargs: PromptInputs = {
             **data_kwargs,
             **{k: v for k, v in embed.to_dict().items() if v is not None},

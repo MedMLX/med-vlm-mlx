@@ -92,21 +92,27 @@ class LanguageModelOutput:
 
 @dataclass
 class InputEmbeddingsFeatures:
-    """Prompt embeddings plus the optional four-dimensional attention mask.
+    """Prompt embeddings plus optional dense or compact visibility metadata.
 
     ``attention_mask_4d`` carries explicit image-block visibility, for example
     a bidirectional mask over an image's patch tokens, and is ``None`` when the
     language model should build its own causal mask.
+    Gemma instead supplies ``prompt_key_validity`` and ``prompt_image_blocks``
+    with shape ``(batch, prompt)`` to construct only the current attention slice.
     """
 
     inputs_embeds: mx.array
     attention_mask_4d: Optional[mx.array] = None
+    prompt_key_validity: mx.array | None = None
+    prompt_image_blocks: mx.array | None = None
 
     def to_dict(self) -> dict[str, mx.array | None]:
-        """Return both fields, preserving ``None`` for the mask."""
+        """Return embeddings and visibility fields, preserving omitted metadata."""
         return {
             "inputs_embeds": self.inputs_embeds,
             "attention_mask_4d": self.attention_mask_4d,
+            "prompt_key_validity": self.prompt_key_validity,
+            "prompt_image_blocks": self.prompt_image_blocks,
         }
 
 

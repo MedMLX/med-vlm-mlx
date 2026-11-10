@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, cast
@@ -19,9 +20,15 @@ from transformers.models.gemma3 import modeling_gemma3 as gemma_reference
 from typing_extensions import TypedDict
 
 from mlx_vlm.contracts import (
+    CacheComponent,
     FloatArray,
+    ImageSource,
+    ModelArgument,
     NumericArray,
+    ProcessedInputs,
+    PromptInputs,
     array_int_list,
+    evaluate,
 )
 from mlx_vlm.models.protocols import require_generation_model, require_language_model
 
@@ -49,9 +56,21 @@ from mlx_vlm.generate.ar import (
     PromptProcessingBatch,
     generate_step,
 )
+from mlx_vlm.generate.dispatch import stream_generate
+from mlx_vlm.generate.types import StopCriteria
+from mlx_vlm.models.base import LanguageModelOutput
 from mlx_vlm.models.gemma3 import Model, ModelConfig, TextConfig, VisionConfig
-from mlx_vlm.models.gemma3.attention import image_attention_mask
+from mlx_vlm.models.gemma3.attention import (
+    cached_attention_mask,
+    image_attention_mask,
+    image_attention_metadata,
+)
 from mlx_vlm.models.gemma3.language import Gemma3Model
+from mlx_vlm.models.gemma3.vision import VisionModel
+from mlx_vlm.server.generation import ResponseGenerator
+from mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer
+from mlx_vlm.utils import StoppingCriteria, ThinkingBudgetCriteria
+from mlx_vlm.vision_cache import VisionFeatureCache
 
 
 class _VisionMasks(Protocol):
@@ -189,6 +208,191 @@ def image_inputs() -> tuple[mx.array, mx.array, mx.array]:
     return ids, pixels, mx.ones(ids.shape, dtype=mx.bool_)
 
 
+def test_gemma_vision_cache_reuses_projected_features_and_invalidates(
+    pair: GemmaPair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep cache hits identical and reject changed pixels, weights or models."""
+    ids, pixels, mask = image_inputs()
+    cache = VisionFeatureCache()
+    expected = pair.model.get_input_embeddings(ids, pixels, mask).inputs_embeds
+    first = pair.model.get_input_embeddings(
+        ids,
+        pixels,
+        mask,
+        vision_cache=cache,
+    ).inputs_embeds
+    np.testing.assert_array_equal(host(first), host(expected))
+    assert len(cache) == 1
+
+    original = type(pair.model.vision_tower).__call__
+    calls = 0
+
+    def encode(
+        tower: VisionModel,
+        x: mx.array,
+        output_hidden_states: bool | None = None,
+    ) -> tuple[mx.array, mx.array, tuple[mx.array, ...] | None]:
+        nonlocal calls
+        calls += 1
+        return original(tower, x, output_hidden_states=output_hidden_states)
+
+    monkeypatch.setattr(type(pair.model.vision_tower), "__call__", encode)
+    hit = pair.model.get_input_embeddings(
+        ids,
+        pixels,
+        mask,
+        vision_cache=cache,
+    ).inputs_embeds
+    np.testing.assert_array_equal(host(hit), host(expected))
+    assert calls == 0
+    pair.model.get_input_embeddings(ids, -pixels, mask, vision_cache=cache)
+    assert calls == 1
+    previous = host(expected)
+    for mutation in ("replace", "update", "load_weights", "array", "numpy"):
+        weight = pair.model.multi_modal_projector.mm_input_projection_weight
+        if mutation == "replace":
+            pair.model.multi_modal_projector.mm_input_projection_weight = weight * 2
+        elif mutation == "numpy":
+            evaluate(weight)
+            borrowed = cast(FloatArray, np.asarray(weight))
+            borrowed[:] *= 2
+            pair.model.invalidate_vision_cache()
+        else:
+            weight[:] = weight * 2
+            if mutation == "update":
+                pair.model.update(
+                    {"multi_modal_projector": {"mm_input_projection_weight": weight}}
+                )
+            elif mutation == "load_weights":
+                pair.model.load_weights(
+                    [("multi_modal_projector.mm_input_projection_weight", weight)],
+                    strict=False,
+                )
+            else:
+                pair.model.invalidate_vision_cache()
+        expected_after_edit = host(
+            pair.model.get_input_embeddings(ids, pixels, mask).inputs_embeds
+        )
+        assert not np.array_equal(expected_after_edit, previous), mutation
+        before = calls
+        actual = pair.model.get_input_embeddings(
+            ids, pixels, mask, vision_cache=cache
+        ).inputs_embeds
+        np.testing.assert_array_equal(host(actual), expected_after_edit)
+        assert calls == before + 1, mutation
+        hit_after_edit = pair.model.get_input_embeddings(
+            ids, pixels, mask, vision_cache=cache
+        ).inputs_embeds
+        np.testing.assert_array_equal(host(hit_after_edit), expected_after_edit)
+        assert calls == before + 1, mutation
+        previous = expected_after_edit
+    before = calls
+    make_pair().model.get_input_embeddings(ids, pixels, mask, vision_cache=cache)
+    assert calls == before + 1
+
+
+@pytest.mark.parametrize("entry", ["public", "http"])
+def test_generation_entry_points_populate_and_reuse_vision_cache(
+    pair: GemmaPair,
+    entry: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids, pixels, mask = image_inputs()
+    cache = VisionFeatureCache()
+
+    class Tokenizer:
+        vocab = {str(index): index for index in range(64)}
+        stopping_criteria: StopCriteria = StoppingCriteria([])
+        thinking_budget_criteria: ThinkingBudgetCriteria | None = None
+
+        def decode(self, token_ids: list[int]) -> str:
+            return " ".join(str(token) for token in token_ids)
+
+        @property
+        def detokenizer(self) -> NaiveStreamingDetokenizer:
+            return NaiveStreamingDetokenizer(self)
+
+    tokenizer = Tokenizer()
+    model = require_generation_model(pair.model)
+    worker = ResponseGenerator.__new__(ResponseGenerator)
+    worker.model = model
+    worker.vision_cache = cache
+
+    def request() -> NumericArray | list[int] | None:
+        if entry == "http":
+            gpu_embed = cast(
+                Callable[
+                    [ProcessedInputs, list[ImageSource]], tuple[mx.array, PromptInputs]
+                ],
+                getattr(worker, "_gpu_embed"),
+            )
+            _, outputs = gpu_embed(
+                {
+                    "input_ids": ids,
+                    "pixel_values": pixels,
+                    "attention_mask": mask,
+                },
+                [pixels],
+            )
+            return host(outputs["inputs_embeds"])
+        results = list(
+            stream_generate(
+                model,
+                tokenizer,
+                "",
+                image=pixels,
+                input_ids=ids,
+                pixel_values=pixels,
+                mask=mask,
+                vision_cache=cache,
+                max_tokens=2,
+                temperature=0,
+            )
+        )
+        return results[-1].token_ids
+
+    first = request()
+    assert len(cache) == 1
+
+    def forbid_encoder(
+        tower: VisionModel,
+        x: mx.array,
+        output_hidden_states: bool | None = None,
+    ) -> tuple[mx.array, mx.array, tuple[mx.array, ...] | None]:
+        raise AssertionError("A repeated request must reuse its image features")
+
+    monkeypatch.setattr(VisionModel, "__call__", forbid_encoder)
+    np.testing.assert_array_equal(request(), first)
+
+
+def test_vision_cache_bounds_bytes_and_revalidates_file_versions(
+    tmp_path: Path,
+) -> None:
+    cache = VisionFeatureCache(max_bytes=24)
+    source = tmp_path / "image.png"
+    source.write_bytes(b"first")
+    first = mx.ones((4,), dtype=mx.float32)
+    cache.put(source, first)
+    assert cache.get(source) is first
+    source.write_bytes(b"second")
+    assert cache.get(source) is None
+    cache.put("other", first)
+    assert cache.current_bytes == 16 and len(cache) == 1
+    cache.put("oversized", mx.ones((7,), dtype=mx.float32))
+    assert cache.get("other") is first and cache.get("oversized") is None
+    cache.clear()
+    assert cache.current_bytes == 0 and len(cache) == 0
+
+    features = [first]
+    cache.put("sequence", features)
+    features.append(mx.ones((10,), dtype=mx.float32))
+    stored = cache.get("sequence")
+    assert stored is not None and not isinstance(stored, mx.array) and len(stored) == 1
+    cache.put("replacement", first)
+    assert cache.current_bytes == 16 and len(cache) == 1
+
+
 def reference_image_logits(pair: GemmaPair) -> tuple[FloatArray, mx.array]:
     ids, pixels, mask = image_inputs()
     features = pair.model.get_input_embeddings(ids, pixels, mask)
@@ -316,7 +520,10 @@ def test_medgemma_published_config_preserves_image_feature_scale() -> None:
 
 
 @pytest.mark.parametrize("window", [4, 32])
-def test_gemma_multiple_images_with_padding_matches_reference(window: int) -> None:
+@pytest.mark.parametrize("padding_side", ["left", "right"])
+def test_gemma_multiple_images_with_padding_matches_reference(
+    window: int, padding_side: str
+) -> None:
     pair = make_pair(window)
     ids = mx.array(
         [
@@ -324,6 +531,8 @@ def test_gemma_multiple_images_with_padding_matches_reference(window: int) -> No
             [0, 2, 63, 63, 63, 63, 8, 63, 63, 63, 63, 9, 10],
         ]
     )
+    if padding_side == "right":
+        ids = mx.concatenate([mx.roll(ids[:1], -2, 1), mx.roll(ids[1:], -1, 1)])
     pixels = mx.reshape(mx.arange(192, dtype=mx.float32), (4, 3, 4, 4)) / 192
     mask = ids != 0
     features = pair.model.get_input_embeddings(ids, pixels, mask)
@@ -350,7 +559,8 @@ def test_gemma_cached_decode_matches_reference_after_rotation(
         ids,
         inputs_embeds=features.inputs_embeds,
         cache=cache,
-        attention_mask_4d=features.attention_mask_4d,
+        prompt_key_validity=features.prompt_key_validity,
+        prompt_image_blocks=features.prompt_image_blocks,
     ).logits
     embeds = features.inputs_embeds
     assert_close(
@@ -362,7 +572,8 @@ def test_gemma_cached_decode_matches_reference_after_rotation(
         actual = pair.model.language_model(
             next_id,
             cache=cache,
-            attention_mask_4d=features.attention_mask_4d,
+            prompt_key_validity=features.prompt_key_validity,
+            prompt_image_blocks=features.prompt_image_blocks,
         ).logits
         ids = mx.concatenate([ids, next_id], axis=1)
         embeds = mx.concatenate(
@@ -388,7 +599,7 @@ def test_gemma_public_chunk_policy_matches_whole_prefill(
         pixels = None
     expected = greedy_steps(pair, ids, pixels, mask)
     actual = greedy_steps(pair, ids, pixels, mask, prefill_step_size=chunk_size)
-    assert pair.model.chunked_prefill_policy(input_ids=ids) is not with_image
+    assert pair.model.chunked_prefill_policy(input_ids=ids)
     for (token, logprobs), (ref_token, ref_logprobs) in zip(
         actual, expected, strict=True
     ):
@@ -416,10 +627,13 @@ def test_gemma_decoder_batch_matches_public_generation(
         input_ids=[array_int_list(ids[0])],
         max_tokens=[4],
         inputs_embeds=features.inputs_embeds,
-        prompt_kwargs={"attention_mask_4d": features.attention_mask_4d},
+        prompt_kwargs={
+            "prompt_key_validity": features.prompt_key_validity,
+            "prompt_image_blocks": features.prompt_image_blocks,
+        },
         prefill_step_size=chunk_size,
     )
-    assert (batch.prefill_step_size is None) is with_image
+    assert batch.prefill_step_size == chunk_size
     while batch.needs_processing():
         batch.prompt_step()
     generated = batch.generate(
@@ -463,17 +677,16 @@ def test_gemma_padded_multirow_batch_matches_independent_generation(
         )
         padded_ids.append(mx.pad(ids, [(0, 0), (padding, 0)]))
         padding_masks.append(mx.pad(mx.ones(ids.shape), [(0, 0), (padding, 0)]))
+    validity, blocks = image_attention_metadata(
+        mx.concatenate(padded_ids), mx.concatenate(padding_masks), 63
+    )
     batch = PromptProcessingBatch(
         model=require_language_model(pair.model.language_model),
         uids=list(range(3)),
         input_ids=[array_int_list(ids[0]) for ids in rows],
         max_tokens=[4] * 3,
         inputs_embeds=mx.concatenate(embeddings),
-        prompt_kwargs={
-            "attention_mask_4d": image_attention_mask(
-                mx.concatenate(padded_ids), mx.concatenate(padding_masks), 63
-            )
-        },
+        prompt_kwargs={"prompt_key_validity": validity, "prompt_image_blocks": blocks},
         prefill_step_size=2,
     )
     while batch.needs_processing():
@@ -512,6 +725,180 @@ def test_gemma_public_generation_preserves_padding_during_decode(
             [embeds, pair.model.language_model.model.embed_tokens(next_id)], axis=1
         )
         mask = mx.concatenate([mask, mx.ones((1, 1), mx.bool_)], axis=1)
+
+
+@pytest.mark.parametrize("terminal_image", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 3, 5])
+def test_multiple_image_blocks_keep_all_keys_in_chunked_prefill(
+    terminal_image: bool,
+    chunk_size: int,
+) -> None:
+    pair = make_pair(sliding_window=4)
+    ids = mx.array([[0, 2, 63, 63, 63, 63, 7, 63, 63, 63, 63]])
+    if not terminal_image:
+        ids = mx.concatenate([ids, mx.array([[9]])], axis=1)
+    mask = ids != 0
+    _, pixels, _ = image_inputs()
+    pixels = mx.concatenate([pixels, -pixels])
+    features = pair.model.get_input_embeddings(ids, pixels, mask)
+    embeds = features.inputs_embeds
+    expected = greedy_steps(pair, ids, pixels, mask)
+    actual = greedy_steps(pair, ids, pixels, mask, prefill_step_size=chunk_size)
+    for (token, probabilities), (ref_token, ref_probabilities) in zip(
+        actual, expected, strict=True
+    ):
+        assert token == ref_token
+        assert_close(host(probabilities), host(ref_probabilities))
+        reference = reference_logits(pair, ids, embeds, mask)[0, -1]
+        assert token == int(np.argmax(reference))
+        next_id = mx.array([[token]])
+        ids = mx.concatenate([ids, next_id], axis=1)
+        embeds = mx.concatenate(
+            [embeds, pair.model.language_model.model.embed_tokens(next_id)], axis=1
+        )
+        mask = mx.concatenate([mask, mx.ones((1, 1), mx.bool_)], axis=1)
+
+
+def test_compact_prompt_visibility_matches_dense_windows_and_rotation() -> None:
+    ids = mx.array([[0, 2, 63, 63, 7, 63, 63, 8, 0], [2, 63, 63, 3, 63, 63, 4, 0, 0]])
+    validity, blocks = image_attention_metadata(ids, ids != 0, 63)
+    dense = image_attention_mask(ids, ids != 0, 63)
+    for offset, queries, keys, window, rotation in [
+        (0, 4, 4, None, 0),
+        (4, 3, 7, 4, 0),
+        (9, 1, 4, 4, 2),
+        (12, 1, 13, None, 0),
+    ]:
+        expected = cached_attention_mask(dense, offset, queries, keys, window, rotation)
+        actual = cached_attention_mask(
+            validity, offset, queries, keys, window, rotation, image_blocks=blocks
+        )
+        np.testing.assert_array_equal(host(actual), host(expected))
+
+
+def test_embedding_visibility_storage_grows_linearly(pair: GemmaPair) -> None:
+    ids = mx.ones((1, 32768), dtype=mx.int32)
+    features = pair.model.get_input_embeddings(ids)
+    assert features.attention_mask_4d is None
+    assert (
+        features.prompt_key_validity is not None
+        and features.prompt_image_blocks is not None
+    )
+    assert features.prompt_key_validity.shape == ids.shape
+    assert features.prompt_image_blocks.shape == ids.shape
+    assert (
+        features.prompt_key_validity.nbytes + features.prompt_image_blocks.nbytes
+        == 5 * ids.size
+    )
+
+
+def test_compact_prompt_metadata_preserves_reused_image_prefix() -> None:
+    pair = make_pair(sliding_window=4)
+    ids, pixels, mask = image_inputs()
+    prefix = pair.model.get_input_embeddings(ids, pixels, mask)
+    cache = pair.model.language_model.make_cache()
+    output = pair.model.language_model(
+        ids,
+        inputs_embeds=prefix.inputs_embeds,
+        cache=cache,
+        prompt_key_validity=prefix.prompt_key_validity,
+        prompt_image_blocks=prefix.prompt_image_blocks,
+    )
+    evaluate(output.logits)
+    suffix = mx.array([[11, 12, 13]])
+    complete = mx.concatenate([ids, suffix], axis=1)
+    validity, blocks = image_attention_metadata(complete, mx.ones(complete.shape), 63)
+    expected = greedy_steps(pair, complete, pixels, mx.ones(complete.shape))
+    actual = list(
+        generate_step(
+            suffix,
+            require_generation_model(pair.model),
+            None,
+            mx.ones(suffix.shape),
+            prompt_cache=[entry for entry in cache],
+            prompt_key_validity=validity,
+            prompt_image_blocks=blocks,
+            temperature=0,
+            prefill_step_size=1,
+            max_tokens=4,
+        )
+    )
+    for (token, probabilities), (ref_token, ref_probabilities) in zip(
+        actual, expected, strict=True
+    ):
+        assert token == ref_token
+        assert_close(host(probabilities), host(ref_probabilities))
+
+
+def test_explicit_dense_prompt_attention_still_overrides_embedding_metadata(
+    pair: GemmaPair,
+) -> None:
+    ids, pixels, mask = image_inputs()
+    expected = greedy_steps(pair, ids, pixels, mask)
+    actual = list(
+        generate_step(
+            ids,
+            require_generation_model(pair.model),
+            pixels,
+            mask,
+            attention_mask_4d=image_attention_mask(ids, mask, 63),
+            temperature=0,
+            prefill_step_size=1,
+            max_tokens=4,
+        )
+    )
+    for (token, probabilities), (ref_token, ref_probabilities) in zip(
+        actual, expected, strict=True
+    ):
+        assert token == ref_token
+        assert_close(host(probabilities), host(ref_probabilities))
+
+
+@dataclass
+class FixedLogitDecoder:
+    """Supply controlled native logits at the generation/model boundary."""
+
+    logits: mx.array
+
+    @property
+    def layers(self) -> tuple[nn.Module, ...]:
+        return ()
+
+    def __call__(
+        self,
+        inputs: mx.array | None = None,
+        /,
+        *,
+        cache: Sequence[CacheComponent] | None = None,
+        **kwargs: ModelArgument,
+    ) -> LanguageModelOutput:
+        return LanguageModelOutput(self.logits[:, None, :])
+
+
+@pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16])
+def test_http_greedy_preserves_normalization_created_ties(dtype: mx.Dtype) -> None:
+    # All logits are finite. Subtracting logsumexp rounds the slightly higher
+    # second logit onto the first; the established normalized path chooses token0.
+    logits = mx.zeros((1, 8192), dtype=dtype)
+    logits[:, 1] = 1e-8 if dtype == mx.float32 else 1e-4
+    probabilities = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+    assert mx.argmax(logits, axis=-1)[0].item() == 1
+    assert mx.argmax(probabilities, axis=-1)[0].item() == 0
+    batch = GenerationBatch(
+        model=FixedLogitDecoder(logits),
+        uids=[0],
+        inputs=mx.array([2]),
+        prompt_cache=[],
+        sampler=lambda scores: mx.argmax(scores, axis=-1),
+        stop_criteria=lambda _: False,
+        max_tokens=[2],
+        greedy_sampling=True,
+    )
+    batch.compute_logprobs = False
+    batch.next()
+    result = batch.next()[0]
+    assert result.token == 0
+    assert result.token_logprob == 0 and result.top_logprobs is None
 
 
 def test_gemma_complete_vision_to_logits_matches_transformers(pair: GemmaPair) -> None:

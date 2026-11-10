@@ -1,18 +1,35 @@
 """Gemma3 multimodal model (MedGemma): SigLIP tower, projector and decoder."""
 
-from collections.abc import Sequence
-from typing import Optional, TypedDict, Unpack
+from collections.abc import Mapping, Sequence
+from typing import Optional, Self, TypedDict, Unpack
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.utils import tree_flatten
 
-from mlx_vlm.contracts import AttentionCache, ModelArgument, einsum
+from mlx_vlm.contracts import (
+    AttentionCache,
+    ModelArgument,
+    einsum,
+    evaluate,
+)
 from mlx_vlm.models.base import InputEmbeddingsFeatures
-from mlx_vlm.models.gemma3.attention import image_attention_mask
+from mlx_vlm.models.gemma3.attention import (
+    image_attention_mask,
+    image_attention_metadata,
+)
 from mlx_vlm.models.gemma3.config import ModelConfig
 from mlx_vlm.models.gemma3.language import LanguageModel, RMSNorm
 from mlx_vlm.models.gemma3.vision import VisionModel
 from mlx_vlm.models.vision_features import merge_vision_features
+from mlx_vlm.vision_cache import VisionFeatureCache
+
+type _ParameterTree = (
+    mx.array
+    | list[_ParameterTree]
+    | tuple[_ParameterTree, ...]
+    | dict[str, _ParameterTree]
+)
 
 
 class EmbeddingOptions(TypedDict, total=False):
@@ -23,6 +40,7 @@ class EmbeddingOptions(TypedDict, total=False):
     # ``pixel_values`` is also supplied. Shape
     # ``(images, mm_tokens_per_image, hidden)`` or ``(tokens, hidden)``.
     cached_image_features: mx.array | None
+    vision_cache: VisionFeatureCache | None
 
 
 class Gemma3MultiModalProjector(nn.Module):
@@ -97,13 +115,17 @@ class Model(nn.Module):
 
     Image placeholder tokens in ``input_ids`` are replaced by projected SigLIP
     features. Text attends causally and each image block attends to itself
-    bidirectionally; the resulting prompt mask is returned as
-    ``attention_mask_4d`` and must be carried through prefill and decoding.
+    bidirectionally. Linear-size validity and image-block metadata are carried
+    through prefill and decoding; each layer constructs its current Q-by-K mask.
     """
 
     # Embedding outputs that ``generate_step`` keeps passing to the decoder at
     # every decode step: cached steps rebuild their mask slice from the prompt mask.
-    generation_persistent_kwargs = ("attention_mask_4d",)
+    generation_persistent_kwargs = (
+        "attention_mask_4d",
+        "prompt_key_validity",
+        "prompt_image_blocks",
+    )
 
     def __init__(self, config: ModelConfig):
         """Create the vision tower, multimodal projector and text decoder."""
@@ -114,6 +136,62 @@ class Model(nn.Module):
         self.vision_tower = VisionModel(config.vision_config)
         self.language_model = LanguageModel(config.text_config)
         self.multi_modal_projector = Gemma3MultiModalProjector(config)
+        self._vision_cache_identity = object()
+        self._vision_cache_parameters: tuple[tuple[str, mx.array], ...] = ()
+
+    def invalidate_vision_cache(self) -> None:
+        """Invalidate projected features after an in-place model edit.
+
+        Call after array-index assignments or writes through external buffer
+        views. MLX exposes no public mutation counter for those edits. Standard
+        ``update``/``load_weights``/``apply`` invalidate automatically; replacing
+        vision/projector parameter objects is detected at the next cache lookup.
+        No weight contents are read or synchronized to maintain this identity.
+        """
+        self._vision_cache_identity = object()
+        self._vision_cache_parameters = ()
+
+    def update(
+        self, parameters: dict[str, _ParameterTree], strict: bool = True
+    ) -> Self:
+        """Replace parameters and invalidate even a partially applied update."""
+        # Invalidate before the base update, which can change some parameters
+        # before raising. Dropping observed references also releases old weights.
+        self.invalidate_vision_cache()
+        return super().update(parameters, strict=strict)
+
+    def _vision_namespace(self, dtype: mx.Dtype) -> tuple[object, ...]:
+        """Identify current parameter objects without relying on recyclable IDs."""
+        parameters = tuple(
+            tree_flatten(
+                {
+                    "vision": self.vision_tower.parameters(),
+                    "projector": self.multi_modal_projector.parameters(),
+                }
+            )
+        )
+        previous = self._vision_cache_parameters
+        if len(previous) != len(parameters) or any(
+            old_name != name or old_weight is not weight
+            for (old_name, old_weight), (name, weight) in zip(
+                previous, parameters, strict=True
+            )
+        ):
+            self.invalidate_vision_cache()
+            # Only this model retains the current objects; cache keys retain the
+            # generation token, never weights from obsolete model generations.
+            self._vision_cache_parameters = parameters
+        return (self._vision_cache_identity, repr(self.config), str(dtype))
+
+    def encode_images(self, pixel_values: mx.array, *, dtype: mx.Dtype) -> mx.array:
+        """Evaluate projected image tokens using the uncached embedding dtype."""
+        hidden_state, _, _ = self.vision_tower(
+            mx.transpose(pixel_values, (0, 2, 3, 1)).astype(dtype),
+            output_hidden_states=True,
+        )
+        features = self.multi_modal_projector(hidden_state)
+        evaluate(features)
+        return features
 
     def get_input_embeddings(
         self,
@@ -138,8 +216,8 @@ class Model(nn.Module):
         Returns:
             ``inputs_embeds`` of shape ``(batch, sequence, hidden)``, not yet
             multiplied by the Gemma embedding scaler (the decoder applies it),
-            and ``attention_mask_4d`` of shape ``(batch, 1, sequence, sequence)``
-            from :func:`image_attention_mask`.
+            plus boolean ``prompt_key_validity`` and int32 ``prompt_image_blocks``
+            of shape ``(batch, sequence)``.
 
         Raises:
             ValueError: If ``input_ids`` is missing, image placeholders have no
@@ -151,37 +229,51 @@ class Model(nn.Module):
         if pixel_values is None:
             if bool(mx.any(input_ids == self.config.image_token_index).item()):
                 raise ValueError("Gemma image placeholders require pixel_values")
+            validity, blocks = image_attention_metadata(
+                input_ids, mask, self.config.image_token_index
+            )
             return InputEmbeddingsFeatures(
                 inputs_embeds=self.language_model.model.embed_tokens(input_ids),
-                attention_mask_4d=image_attention_mask(
-                    input_ids, mask, self.config.image_token_index
-                ),
+                prompt_key_validity=validity,
+                prompt_image_blocks=blocks,
             )
 
         inputs_embeds = self.language_model.model.embed_tokens(input_ids)
 
         cached = kwargs.get("cached_image_features", None)
+        vision_cache = kwargs.get("vision_cache")
+        namespace = (
+            self._vision_namespace(inputs_embeds.dtype)
+            if vision_cache is not None
+            else None
+        )
+        if cached is None and vision_cache is not None:
+            cached = vision_cache.get(pixel_values, namespace=namespace)
+            if cached is not None and not isinstance(cached, mx.array):
+                raise TypeError("Gemma cached image features must be one MLX array")
         if cached is not None:
             image_features = cached
         else:
-            hidden_state, _, _ = self.vision_tower(
-                mx.transpose(pixel_values, (0, 2, 3, 1)).astype(inputs_embeds.dtype),
-                output_hidden_states=True,
+            image_features = self.encode_images(
+                pixel_values,
+                dtype=inputs_embeds.dtype,
             )
+            if vision_cache is not None:
+                vision_cache.put(pixel_values, image_features, namespace=namespace)
 
-            image_features = self.multi_modal_projector(hidden_state)
-
-        final_inputs_embeds, final_attention_mask_4d = (
-            self.prepare_inputs_for_multimodal(
-                self.config.image_token_index,
-                image_features,
-                inputs_embeds,
-                input_ids,
-                mask,
-            )
+        final_inputs_embeds = self._merge_multimodal_embeddings(
+            self.config.image_token_index,
+            image_features,
+            inputs_embeds,
+            input_ids,
+        )
+        validity, blocks = image_attention_metadata(
+            input_ids, mask, self.config.image_token_index
         )
         return InputEmbeddingsFeatures(
-            inputs_embeds=final_inputs_embeds, attention_mask_4d=final_attention_mask_4d
+            inputs_embeds=final_inputs_embeds,
+            prompt_key_validity=validity,
+            prompt_image_blocks=blocks,
         )
 
     @staticmethod
@@ -210,6 +302,24 @@ class Model(nn.Module):
             ValueError: If the placeholder count differs from the number of
                 feature rows, or features are not finite.
         """
+        embeddings = Model._merge_multimodal_embeddings(
+            image_token_index,
+            image_features,
+            inputs_embeds,
+            input_ids,
+        )
+        return embeddings, image_attention_mask(
+            input_ids, attention_mask, image_token_index
+        )
+
+    @staticmethod
+    def _merge_multimodal_embeddings(
+        image_token_index: int,
+        image_features: mx.array,
+        inputs_embeds: mx.array,
+        input_ids: mx.array,
+    ) -> mx.array:
+        """Merge image rows with the decoder's embedding-scale compensation."""
         # The decoder multiplies every input embedding by this scaler (rounded
         # through bfloat16), so divide the image features by it here and they
         # reach the decoder unscaled, as in Transformers. The width comes from
@@ -221,27 +331,17 @@ class Model(nn.Module):
         embeddings = merge_vision_features(
             image_token_index, image_features / scaler, inputs_embeds, input_ids
         )
-        return embeddings, image_attention_mask(
-            input_ids, attention_mask, image_token_index
-        )
+        return embeddings
 
     def chunked_prefill_policy(
         self,
         *,
         input_ids: mx.array | None = None,
+        prefill_kwargs: Mapping[str, ModelArgument] | None = None,
         **kwargs: object,
     ) -> bool:
-        """Return whether prefill may be split into chunks.
-
-        An arbitrary chunk boundary can fall inside a bidirectional image block,
-        before all keys of that block exist. Prompts with image placeholders
-        therefore prefill whole until the scheduler supports image-aligned
-        boundaries; text-only prompts may be chunked.
-        """
-        has_images = input_ids is not None and bool(
-            mx.any(input_ids == self.config.image_token_index).item()
-        )
-        return not has_images
+        """Enable planned image-aligned chunks while honoring explicit dense masks."""
+        return self.language_model.chunked_prefill_policy(prefill_kwargs=prefill_kwargs)
 
     @property
     def layers(self):
@@ -268,12 +368,12 @@ class Model(nn.Module):
             input_ids, pixel_values, mask
         )
         inputs_embeds = input_embeddings_features.inputs_embeds
-        attention_mask = input_embeddings_features.attention_mask_4d
-
         logits = self.language_model(
             inputs=input_ids,
             cache=cache,
             inputs_embeds=inputs_embeds,
-            attention_mask_4d=attention_mask,
+            attention_mask_4d=input_embeddings_features.attention_mask_4d,
+            prompt_key_validity=input_embeddings_features.prompt_key_validity,
+            prompt_image_blocks=input_embeddings_features.prompt_image_blocks,
         )
         return logits

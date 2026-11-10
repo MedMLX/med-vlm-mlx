@@ -126,6 +126,8 @@ class GenerationForwardOptions(TypedDict, total=False):
     typical_p: float
     cached_image_features: mx.array | Sequence[mx.array] | None
     attention_mask_4d: mx.array | None
+    prompt_key_validity: mx.array | None
+    prompt_image_blocks: mx.array | None
     inputs_embeds: mx.array | None
     thinking_budget_criteria: ThinkingBudgetCriteria | None
 

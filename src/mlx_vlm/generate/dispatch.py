@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import Generator, List, Optional, cast
 
 import mlx.core as mx
@@ -16,7 +16,6 @@ from mlx_vlm.contracts import (
     InputTensor,
     PromptInputs,
     array_int_list,
-    evaluate,
     is_cache_entry_list,
     is_int_list,
     is_pixel_values,
@@ -27,7 +26,7 @@ from mlx_vlm.generate.common import (
     wired_limit,
 )
 from mlx_vlm.models import cache
-from mlx_vlm.models.gemma3.attention import image_attention_mask
+from mlx_vlm.models.gemma3.attention import image_attention_metadata
 from mlx_vlm.models.protocols import GenerationModelLike
 from mlx_vlm.tokenizer_utils import make_streaming_detokenizer
 from mlx_vlm.utils import (
@@ -36,7 +35,6 @@ from mlx_vlm.utils import (
     prepare_inputs,
     should_add_special_tokens,
 )
-from mlx_vlm.vision_cache import VisionFeatures
 
 logger = logging.getLogger("mlx_vlm.generate")
 
@@ -119,18 +117,6 @@ def prepare_generation_inputs(
     return input_ids, pixel_values, mask, data_kwargs
 
 
-def require_vision_features(value: object) -> VisionFeatures:
-    """Validate native encoder output without copying its lazy array buffers."""
-    if isinstance(value, mx.array):
-        return value
-    if isinstance(value, (list, tuple)) and all(
-        isinstance(item, mx.array)
-        for item in cast(list[object] | tuple[object, ...], value)
-    ):
-        return cast(Sequence[mx.array], value)
-    raise TypeError("Vision encoder must return an MLX array or a list/tuple of arrays")
-
-
 def _drop_cached_media_inputs(kwargs: GenerationOptionsBase) -> None:
     """After full-prompt position priming, embed the cached suffix as text only."""
     kwargs.pop("cached_image_features", None)
@@ -191,8 +177,8 @@ def stream_generate(
         prompt (str): The input prompt text.
         image: Optional image input or inputs accepted by the processor.
         prefill_step_size (int, optional): Number of tokens to process per prefill
-          step when the model permits chunked prefill. The model may disable
-          chunking for inputs such as Gemma image blocks.
+          step when the model permits chunked prefill. Gemma extends cuts to
+          keep each bidirectional image block complete.
         kwargs: Generation, media, and cache options declared by
           ``StreamGenerateKwargs``; remaining step options go to
           :func:`generate_step`.
@@ -235,27 +221,10 @@ def stream_generate(
         model, processor, prompt, image, kwargs
     )
 
-    # Vision feature caching: reuse cached image features across turns
-    if vision_cache is not None and image is not None and pixel_values is not None:
-        cached = vision_cache.get(image)
-        if cached is not None:
-            kwargs["cached_image_features"] = cached
-        elif hasattr(model, "encode_images"):
-            encode_images = getattr(model, "encode_images")
-            if not callable(encode_images):
-                raise TypeError("model.encode_images must be callable")
-            features = require_vision_features(encode_images(pixel_values, **kwargs))
-            evaluate(*features)
-            vision_cache.put(image, features)
-            kwargs["cached_image_features"] = features
-        elif hasattr(model, "encode_image"):
-            encode_image = getattr(model, "encode_image")
-            if not callable(encode_image):
-                raise TypeError("model.encode_image must be callable")
-            features = require_vision_features(encode_image(pixel_values))
-            evaluate(features)
-            vision_cache.put(image, features)
-            kwargs["cached_image_features"] = features
+    # The embedding owner keys processed pixels and caches the exact projected
+    # features it consumes; HTTP batching uses this same boundary.
+    if vision_cache is not None and pixel_values is not None:
+        kwargs["vision_cache"] = vision_cache
 
     # Prompt cache reuse: skip common prefix from previous turn
     reused_prefix_len = 0
@@ -295,10 +264,12 @@ def stream_generate(
     if reused_prefix_len:
         if not isinstance(image_token_id, int):
             raise ValueError("MedGemma configuration requires image_token_index")
-        # The decoder indexes the complete prompt mask by its cache offset.
-        kwargs["attention_mask_4d"] = image_attention_mask(
+        # The decoder indexes complete prompt metadata by its cache offset.
+        validity, blocks = image_attention_metadata(
             full_input_ids, mask, image_token_id
         )
+        kwargs["prompt_key_validity"] = validity
+        kwargs["prompt_image_blocks"] = blocks
         if mask is not None:
             mask = mask[:, reused_prefix_len:]
 
