@@ -53,6 +53,32 @@ def test_http_image_accepts_inline_data() -> None:
     assert ChatRequest.model_validate(payload).messages[0].role == "user"
 
 
+@pytest.mark.parametrize("max_tokens", [0, -1])
+def test_http_generation_requires_a_positive_token_limit(max_tokens: int) -> None:
+    with pytest.raises(ValidationError):
+        ChatRequest.model_validate(
+            {
+                "model": "medgemma",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": "Describe the image."}],
+            }
+        )
+
+
+@pytest.mark.parametrize("max_tokens", [0, -1])
+def test_http_generation_validates_default_token_limit(
+    monkeypatch: pytest.MonkeyPatch, max_tokens: int
+) -> None:
+    monkeypatch.setenv("MLX_VLM_MAX_TOKENS", str(max_tokens))
+    with pytest.raises(ValidationError, match="max_tokens"):
+        ChatRequest.model_validate(
+            {
+                "model": "medgemma",
+                "messages": [{"role": "user", "content": "Describe the image."}],
+            }
+        )
+
+
 def test_invalid_inline_image_error_redacts_source() -> None:
     source = "data:image/png;base64,cHJpdmF0ZS1pbWFnZS1ieXRlcw=="
     with pytest.raises(ValueError, match="Failed to load image") as error:
@@ -108,10 +134,15 @@ def test_non_loopback_bind_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> 
 @pytest.mark.parametrize("kind", [[], {}])
 def test_malformed_content_type_returns_validation_error(kind: object) -> None:
     with TestClient(app, base_url="http://localhost") as client:
-        response = client.post("/v1/chat/completions", json={
-            "model": "medgemma",
-            "messages": [{"role": "user", "content": [{"type": kind, "text": "hello"}]}],
-        })
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "medgemma",
+                "messages": [
+                    {"role": "user", "content": [{"type": kind, "text": "hello"}]}
+                ],
+            },
+        )
     assert response.status_code == 422
 
 
