@@ -280,6 +280,11 @@ def generate_step(
         min_p (float, optional): Minimum probability threshold relative to the
           highest-probability token.
         top_k (int, optional): Restrict sampling to the top-k tokens.
+        top_n_sigma (float, optional): Top-nσ sampling threshold for
+          ``make_sampler``.
+        p_less (bool, optional): Use hyperparameter-free p-less sampling.
+        typical_p (float, optional): Locally typical sampling mass; ``1.0``
+          disables it.
         logit_bias (dictionary, optional): Additive logit bias.
         prompt_cache (list, optional): Pre-existing KV cache for the prompt.
         max_kv_size (int, optional): Maximum KV cache size.
@@ -294,10 +299,18 @@ def generate_step(
         prefill_step_size (int): Number of tokens to process per prefill step.
           Chunking is subject to the model's prefill policy; for example, Gemma
           image blocks must remain whole.
+        seed (int, optional): With no ``sampler``, a positive temperature and
+          default ``min_p``, ``top_n_sigma``, ``p_less`` and ``typical_p``,
+          draws each token from a stateless stream keyed by ``seed`` and the
+          token position. Ignored otherwise.
+        verbose (bool): Show a progress bar during prefill.
+        thinking_budget_criteria (ThinkingBudgetCriteria, optional): Consulted
+          after each yielded token; a token it forces replaces the next one.
+        **kwargs: Extra model inputs passed to every forward call.
 
     Yields:
-        Generator[Tuple[mx.array, mx.array], None, None]: A generator producing
-          one token and a vector of log probabilities.
+        Tuple[int, mx.array]: The next token id and its vector of log
+          probabilities.
     """
 
     quantize_cache_fn = functools.partial(
@@ -973,6 +986,14 @@ class GenerationBatch:
 
     @dataclass
     class Response:
+        """One sequence's result from ``next``.
+
+        ``token_logprob`` is 0.0 when log probabilities are not computed;
+        ``finish_reason`` is ``"stop"``, ``"length"`` or ``None`` while the
+        sequence continues; ``top_logprobs`` holds ``(token, logprob)`` pairs
+        when requested.
+        """
+
         uid: int
         token: int | None
         token_logprob: float
