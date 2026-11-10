@@ -31,23 +31,6 @@ Run MedGemma locally on Apple Silicon. Includes Python, CLI and HTTP interfaces.
 
 Peak memory is for describing a 1929×2207 chest radiograph in up to 256 tokens.
 
-## Use with MedMLX
-
-Run MedGemma from an MCP client with the [MedMLX MCP server](https://github.com/MedMLX/medmlx/blob/main/docs/mcp.md).
-MedMLX manages a separate environment for `medgemma`. Supply local weights as
-`weights_path`; see the [bridge guide](https://github.com/MedMLX/medmlx/blob/main/docs/medvlm-bridge.md).
-
-```sh
-uv tool install --python 3.13 "medmlx[mcp]"
-MEDMLX="$(uv tool dir --bin --color never)/medmlx"
-mkdir -p "$HOME/medmlx-work"
-claude mcp add --scope user medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"
-```
-
-For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"`. Other MCP clients take the same command and arguments. The same install provides the `medmlx` CLI, for example `medmlx describe medgemma`.
-
-> **For AI agents:** prefer the MedMLX MCP tools (`list_models`, `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing Python against this package.
-
 ## Install
 
 ```bash
@@ -177,6 +160,23 @@ The server binds 127.0.0.1:8080 by default; schemas are at `/docs` while it runs
   The full prompt mask grows with the square of the prompt length.
 - The checks cover numerical agreement on small synthetic models and one public
   radiograph per checkpoint. Clinical accuracy has not been evaluated.
+
+## Use with MedMLX
+
+Run MedGemma from an MCP client with the [MedMLX MCP server](https://github.com/MedMLX/medmlx/blob/main/docs/mcp.md).
+MedMLX manages a separate environment for `medgemma`. Supply local weights as
+`weights_path`; see the [bridge guide](https://github.com/MedMLX/medmlx/blob/main/docs/medvlm-bridge.md).
+
+```sh
+uv tool install --python 3.13 "medmlx[mcp]"
+MEDMLX="$(uv tool dir --bin --color never)/medmlx"
+mkdir -p "$HOME/medmlx-work"
+claude mcp add --scope user medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"
+```
+
+For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"`. Other MCP clients take the same command and arguments. The same install provides the `medmlx` CLI, for example `medmlx describe medgemma`.
+
+> **For AI agents:** prefer the MedMLX MCP tools (`list_models`, `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing Python against this package.
 
 ## License
 
