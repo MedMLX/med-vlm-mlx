@@ -94,13 +94,21 @@ still apply.
 | `python -m mlx_vlm convert` | Convert or quantize a Gemma3 checkpoint to MLX |
 | `python -m mlx_vlm server` | Serve an OpenAI-compatible HTTP API |
 
-The `mlx_vlm.generate`, `mlx_vlm.convert` and `mlx_vlm.server` console scripts
-call the same entry points; add `--help` for every option. `generate` takes
-`--model` (default `mlx-community/medgemma-1.5-4b-it-4bit`, with `--revision`
-for a pinned commit), `--image` (paths or URLs), a required `--prompt`,
-`--system`, `--max-tokens` (2048), `--temperature` (0, greedy), `--top-p`,
-`--top-k`, `--seed` (0) and `--prefill-step-size`. `--verbose` streams the text
-with token timings. Prompts without images also work.
+The `mlx_vlm.generate`, `mlx_vlm.convert` and `mlx_vlm.server` console scripts call the
+same entry points; add `--help` for every option. `generate` takes:
+
+| Option | Default | Meaning |
+| :--- | :--- | :--- |
+| `--model` | `mlx-community/medgemma-1.5-4b-it-4bit` | Model folder or Hub ID; `--revision` pins a commit |
+| `--image` | | Image paths or URLs; prompts without images also work |
+| `--prompt` | Required | User prompt |
+| `--system` | | System prompt |
+| `--max-tokens` | 2048 | Generation limit |
+| `--temperature` | 0 (greedy) | Sampling temperature |
+| `--top-p`, `--top-k` | | Sampling cutoffs |
+| `--seed` | 0 | Random seed |
+| `--prefill-step-size` | | Prefill chunk size |
+| `--verbose` | | Streams the text with token timings |
 
 ### Python API
 
@@ -120,13 +128,13 @@ response = generate(
 print(response.text)
 ```
 
-`load` takes a local folder, or a Hub ID with `revision`. With
-`local_files_only=True` (and an optional `cache_dir`) it uses only the Hugging
-Face cache and raises instead of downloading. `stream_generate` takes the same
-arguments and yields `GenerationResult` text segments; iterate it to the end so
-the prompt cache and cleanup run. The final result has `finish_reason` and
-`token_ids`, which include the stop token. `batch_generate` shares the same
-generation and cache code.
+- `load` takes a local folder, or a Hub ID with `revision`. With `local_files_only=True`
+  (and an optional `cache_dir`) it uses only the Hugging Face cache and raises instead of
+  downloading.
+- `stream_generate` takes the same arguments and yields `GenerationResult` text segments;
+  iterate it to the end so the prompt cache and cleanup run. The final result has
+  `finish_reason` and `token_ids`, which include the stop token.
+- `batch_generate` shares the same generation and cache code.
 
 ### HTTP server
 
@@ -138,14 +146,23 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"medgemma","messages":[{"role":"user","content":"What is 2 + 2?"}],"max_tokens":16}'
 ```
 
-The server binds 127.0.0.1:8080 by default and provides `/v1/chat/completions`,
-`/v1/models`, `/health`, `/metrics` and `/v1/settings` for runtime settings;
-schemas are at `/docs` while it runs. `--api-key` requires a bearer token for
-inference and management requests and is required when binding outside loopback.
-`--model-dir` adds folders to search for models. Images use a base64
-`data:image/...` URI in an `image_url` content part next to the text. Requests
-are batched when their sampling, seed and logprob settings match; others wait
-their turn in queue order.
+The server binds 127.0.0.1:8080 by default; schemas are at `/docs` while it runs.
+
+| Endpoint | Purpose |
+| :--- | :--- |
+| `/v1/chat/completions` | Chat completions |
+| `/v1/models` | Available models |
+| `/health` | Health check |
+| `/metrics` | Metrics |
+| `/v1/settings` | Runtime settings |
+
+- `--api-key` requires a bearer token for inference and management requests, and is
+  required when binding outside loopback.
+- `--model-dir` adds folders to search for models.
+- Images use a base64 `data:image/...` URI in an `image_url` content part next to the
+  text.
+- Requests are batched when their sampling, seed and logprob settings match; others wait
+  their turn in queue order.
 
 ### Inputs and limitations
 
