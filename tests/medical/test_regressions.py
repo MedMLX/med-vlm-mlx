@@ -452,6 +452,22 @@ def test_control_text_matches_transformers(pair: GemmaPair) -> None:
     assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("max_tokens", [-1, 1.5])
+def test_generation_rejects_unreachable_token_limits(
+    pair: GemmaPair, max_tokens: int | float
+) -> None:
+    with pytest.raises(ValueError, match="max_tokens"):
+        next(
+            generate_step(
+                mx.array([[2, 4, 6]]),
+                require_generation_model(pair.model),
+                None,
+                None,
+                max_tokens=cast(int, max_tokens),
+            )
+        )
+
+
 def test_control_explicit_image_mask_matches_transformers(pair: GemmaPair) -> None:
     expected, embeds = reference_image_logits(pair)
     ids, _, _ = image_inputs()

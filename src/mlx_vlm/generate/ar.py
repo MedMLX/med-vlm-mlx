@@ -261,7 +261,7 @@ def generate_step(
         model (nn.Module): The model to use for generation.
         pixel_values: The pixel values for vision models (optional).
         mask: The attention mask (optional).
-        max_tokens (int): Maximum number of tokens to generate.
+        max_tokens (int): Non-negative integer limit on the generated tokens.
         temperature (float): The temperature for sampling, if 0 the argmax is used.
         repetition_penalty (float, optional): The penalty factor for repeating
           tokens.
@@ -311,7 +311,13 @@ def generate_step(
     Yields:
         Tuple[int, mx.array]: The next token id and its vector of log
           probabilities.
+
+    Raises:
+        ValueError: ``max_tokens`` is not a non-negative integer.
     """
+
+    if type(max_tokens) is not int or max_tokens < 0:
+        raise ValueError("max_tokens must be a non-negative integer")
 
     quantize_cache_fn = functools.partial(
         maybe_quantize_kv_cache,
