@@ -1,9 +1,7 @@
 """Medical path regressions and parity checks against official Transformers.
 
-These are synthetic engineering tests, not medical task accuracy benchmarks.
-Weights are seeded random tiny models and inputs are synthetic, so agreement
-here does not show agreement for the full checkpoints. Run through
-``make test``, which sets MLX_ENABLE_TF32=0 and uses the ``med-vlm-mlx`` environment.
+The tiny seeded models use chest X-ray pixels. Comparisons run with
+``MLX_ENABLE_TF32=0`` and do not use the full checkpoints.
 """
 
 from __future__ import annotations
@@ -13,9 +11,10 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol, cast
+from typing import Callable, Literal, Protocol, cast
 
 from numpy.typing import NDArray
+from PIL import Image
 from transformers.models.gemma3 import modeling_gemma3 as gemma_reference
 from typing_extensions import TypedDict
 
@@ -202,9 +201,32 @@ def greedy_steps(
     )
 
 
+def xray_pixels(count: Literal[1, 4]) -> mx.array:
+    """Resize the sourced radiograph or its quadrants for the tiny vision model."""
+    path = Path.home() / ".cache/medmlx/test-data/chest_xray.jpg"
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+        width, height = image.size
+        boxes = (
+            [(0, 0, width, height)]
+            if count == 1
+            else [
+                (0, 0, width // 2, height // 2),
+                (width // 2, 0, width, height // 2),
+                (0, height // 2, width // 2, height),
+                (width // 2, height // 2, width, height),
+            ]
+        )
+        arrays = [
+            np.asarray(image.crop(box).resize((4, 4)), dtype=np.float32) / 255
+            for box in boxes
+        ]
+    return mx.array(np.stack(arrays).transpose(0, 3, 1, 2))
+
+
 def image_inputs() -> tuple[mx.array, mx.array, mx.array]:
     ids = mx.array([[2, 63, 63, 63, 63, 7, 9]])
-    pixels = mx.reshape(mx.arange(48, dtype=mx.float32), (1, 3, 4, 4)) / 48
+    pixels = xray_pixels(1)
     return ids, pixels, mx.ones(ids.shape, dtype=mx.bool_)
 
 
@@ -549,7 +571,7 @@ def test_gemma_multiple_images_with_padding_matches_reference(
     )
     if padding_side == "right":
         ids = mx.concatenate([mx.roll(ids[:1], -2, 1), mx.roll(ids[1:], -1, 1)])
-    pixels = mx.reshape(mx.arange(192, dtype=mx.float32), (4, 3, 4, 4)) / 192
+    pixels = xray_pixels(4)
     mask = ids != 0
     features = pair.model.get_input_embeddings(ids, pixels, mask)
     expected = reference_logits(pair, ids, features.inputs_embeds, mask)
