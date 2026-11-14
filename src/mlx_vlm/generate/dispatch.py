@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from typing import Generator, List, Optional, cast
 
 import mlx.core as mx
@@ -161,6 +162,15 @@ def _prefix_cache_trim_amount(
 from mlx_vlm.generate.ar import generate_step
 
 
+@contextmanager
+def _clear_mlx_cache_on_exit() -> Generator[None]:
+    """Release MLX's pooled free buffers when generation ends, however it ends."""
+    try:
+        yield
+    finally:
+        mx.clear_cache()
+
+
 def stream_generate(
     model: GenerationModelLike,
     processor: ProcessorLike | TokenizerLike | PreTrainedTokenizer,
@@ -189,8 +199,13 @@ def stream_generate(
           The final result carries ``finish_reason`` and the generated ``token_ids``;
           the latter includes the stop token when generation stops on one.
 
-    Iterate to exhaustion, including after the final result, so optional prompt
-    cache updates and generation cleanup following the final yield can run.
+    When ``prompt_cache_state`` is given, it is updated with the full token ids
+    and KV cache before the final result is yielded, so a consumer may stop at
+    ``finish_reason`` without exhausting the generator. A generation that is
+    closed or fails before its final result publishes nothing, and a state whose
+    cache that generation had taken for reuse is emptied rather than left
+    holding a cache that no longer matches its token ids. The MLX buffer cache is
+    cleared however the generator ends.
     """
     tokenizer = resolve_tokenizer(processor)
     verbose = kwargs.pop("verbose", False)
@@ -260,6 +275,11 @@ def stream_generate(
             pixel_values = None
             _drop_cached_media_inputs(kwargs)
             kwargs["prompt_cache"] = kv_cache
+            # The generation now mutates this cache in place. Detach it so an
+            # unfinished generation cannot leave token ids that disagree with
+            # the cache contents; completion publishes the new pair.
+            prompt_cache_state.cache = None
+            prompt_cache_state.token_ids = None
 
     if reused_prefix_len:
         if not isinstance(image_token_id, int):
@@ -315,7 +335,7 @@ def stream_generate(
 
     total_prompt_tokens = reused_prefix_len + input_ids.size
 
-    with wired_limit(model, [generation_stream]):
+    with _clear_mlx_cache_on_exit(), wired_limit(model, [generation_stream]):
         detokenizer = make_streaming_detokenizer(processor)
         thinking_criteria = getattr(tokenizer, "thinking_budget_criteria", None)
         for key in kwargs:
@@ -400,6 +420,13 @@ def stream_generate(
             return
 
         detokenizer.finalize()
+        # Publish reusable state before the final result, which consumers may
+        # treat as the end of the generator and never resume.
+        if prompt_cache_state is not None:
+            assert tracked_cache is not None
+            prompt_cache_state.update(
+                full_input_ids_list + [t for t in generated_tokens], tracked_cache
+            )
         yield GenerationResult(
             text=detokenizer.last_segment,
             token=token,
@@ -414,16 +441,6 @@ def stream_generate(
             finish_reason=finish_reason,
             token_ids=[int(t) for t in generated_tokens],
         )
-
-        # Save cache state for potential reuse on next turn
-        all_ids: Optional[List[int]] = None
-        if prompt_cache_state is not None:
-            all_ids = full_input_ids_list + [t for t in generated_tokens]
-            assert tracked_cache is not None
-            prompt_cache_state.update(all_ids, tracked_cache)
-
-        # Cleanup after generation
-        mx.clear_cache()
 
 
 def generate(

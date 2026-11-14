@@ -11,7 +11,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Protocol, cast
+from typing import Callable, Generator, Literal, Protocol, cast
 
 from numpy.typing import NDArray
 from PIL import Image
@@ -55,6 +55,7 @@ from mlx_vlm.generate.ar import (
     PromptProcessingBatch,
     generate_step,
 )
+from mlx_vlm.generate.common import GenerationResult, PromptCacheState
 from mlx_vlm.generate.dispatch import stream_generate
 from mlx_vlm.generate.types import StopCriteria
 from mlx_vlm.models.base import LanguageModelOutput
@@ -386,6 +387,59 @@ def test_generation_entry_points_populate_and_reuse_vision_cache(
 
     monkeypatch.setattr(VisionModel, "__call__", forbid_encoder)
     np.testing.assert_array_equal(request(), first)
+
+
+def test_stream_generate_publishes_prompt_cache_before_final_result(
+    pair: GemmaPair,
+) -> None:
+    """A consumer may stop at ``finish_reason``; an unfinished run publishes nothing."""
+    ids, pixels, mask = image_inputs()
+
+    class Tokenizer:
+        vocab = {str(index): index for index in range(64)}
+        stopping_criteria: StopCriteria = StoppingCriteria([])
+        thinking_budget_criteria: ThinkingBudgetCriteria | None = None
+
+        def decode(self, token_ids: list[int]) -> str:
+            return " ".join(str(token) for token in token_ids)
+
+        @property
+        def detokenizer(self) -> NaiveStreamingDetokenizer:
+            return NaiveStreamingDetokenizer(self)
+
+    model = require_generation_model(pair.model)
+    state = PromptCacheState()
+
+    def run(prompt_ids: mx.array, prompt_mask: mx.array) -> Generator[GenerationResult]:
+        return stream_generate(
+            model,
+            Tokenizer(),
+            "",
+            image=pixels,
+            input_ids=prompt_ids,
+            pixel_values=pixels,
+            mask=prompt_mask,
+            prompt_cache_state=state,
+            max_tokens=2,
+            temperature=0,
+        )
+
+    generated: list[int] = []
+    for part in run(ids, mask):
+        if part.finish_reason is not None:
+            generated = part.token_ids or []
+            break
+    assert generated and state.cache is not None
+    assert state.token_ids == array_int_list(ids.flatten()) + generated
+
+    # Reuse the cached prefix with a longer text-only suffix, then close the
+    # generator before its final result: the taken cache must not stay published.
+    longer = mx.concatenate([ids, mx.array([[5]])], axis=1)
+    longer_mask = mx.ones(longer.shape, dtype=mx.bool_)
+    interrupted = run(longer, longer_mask)
+    assert next(interrupted).cached_tokens > 0
+    interrupted.close()
+    assert state.cache is None and state.token_ids is None
 
 
 def test_vision_cache_bounds_bytes_and_revalidates_file_versions(
