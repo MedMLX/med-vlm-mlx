@@ -13,7 +13,7 @@ Run MedGemma locally on Apple Silicon. Includes Python, CLI and HTTP interfaces.
 
 <img src="https://raw.githubusercontent.com/MedMLX/med-vlm-mlx/main/docs/example.png" alt="Chest radiograph beside the description MedGemma 1.5 4B generated for it" width="100%">
 
-<sub>MedGemma 1.5 4B output for Mikael Häggström's [chest radiograph](https://commons.wikimedia.org/wiki/File:Normal_posteroanterior_(PA)_chest_radiograph_(X-ray).jpg), CC0 1.0.</sub>
+<sub>MedGemma 1.5 4B output for Mikael Häggström's [chest radiograph](https://commons.wikimedia.org/wiki/File:Normal_posteroanterior_%28PA%29_chest_radiograph_%28X-ray%29.jpg), CC0 1.0.</sub>
 
 </div>
 
