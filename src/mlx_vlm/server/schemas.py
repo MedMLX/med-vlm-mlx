@@ -392,13 +392,17 @@ class VLMRequest(FlexibleBaseModel):
     )
     resize_shape: Optional[ResizeShapeInput] = Field(
         default=None,
-        description="Resize shape for the image. Provide one integer for square or two for (height, width).",
+        description=(
+            "Fit each image within this box, keeping its aspect ratio, before the "
+            "model's own image resize. Provide one integer for a square or two "
+            "for (width, height)."
+        ),
     )
 
     @field_validator("resize_shape", mode="before")
     @classmethod
     def normalize_resize_shape_field(cls, value: object) -> tuple[int, int] | None:
-        """Normalize one or two sizes to an ``(height, width)`` tuple."""
+        """Normalize one or two sizes to a ``(width, height)`` tuple."""
         return normalize_resize_shape(value)
 
 

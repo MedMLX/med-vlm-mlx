@@ -203,7 +203,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
             if len(request.resize_shape) not in [1, 2]:
                 raise HTTPException(
                     status_code=400,
-                    detail="resize_shape must contain exactly two integers (height, width)",
+                    detail="resize_shape must contain one or two integers (width, height)",
                 )
             kwargs["resize_shape"] = (
                 (request.resize_shape[0], request.resize_shape[0])
