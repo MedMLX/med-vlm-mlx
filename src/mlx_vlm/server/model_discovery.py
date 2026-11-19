@@ -46,14 +46,15 @@ def _weight_status(directory: Path) -> bool | None:
             if not isinstance(filename, str):
                 return False
             shards.add(Path(filename))
-    if shards:
-        return all(
-            not shard.is_absolute()
-            and ".." not in shard.parts
-            and shard.suffix == ".safetensors"
-            and present(directory / shard)
-            for shard in shards
-        )
+    if any(
+        shard.is_absolute() or ".." in shard.parts or shard.suffix != ".safetensors"
+        for shard in shards
+    ):
+        return False
+    # As in load_model, an index whose shards are all absent is stale (the
+    # published MedGemma folders ship one); only a partial set is invalid.
+    if any((directory / shard).is_file() for shard in shards):
+        return all(present(directory / shard) for shard in shards)
     weights = list(directory.glob("*.safetensors"))
     if not weights:
         return None
@@ -69,9 +70,10 @@ def is_model_directory(directory: Path) -> bool:
 
     This is a discovery filter, not checkpoint validation: it does not parse
     weight files, verify tensor names or test whether the model can be loaded.
-    For an index, every declared shard must be a nonempty relative safetensors
-    path without parent traversal; without an index, any qualifying nonempty
-    safetensors file is sufficient.
+    Every shard an index declares must be a relative safetensors path without
+    parent traversal. When any declared shard exists, all must be present and
+    nonempty; when none exists the index is stale and, as without an index,
+    any qualifying nonempty safetensors file is sufficient.
     """
     try:
         config = read_json_object(directory / "config.json")
