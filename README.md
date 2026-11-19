@@ -153,9 +153,9 @@ The server binds 127.0.0.1:8080 by default; schemas are at `/docs` while it runs
   and external speculative drafters are refused.
 - Inference only, on Metal: no training, adapters, or CPU, MPS or PyTorch
   fallback.
-- Prompts with images are prefilled whole, because a chunk could split an
-  image's bidirectional attention block; text-only prompts use chunked prefill.
-  The full prompt mask grows with the square of the prompt length.
+- A prefill chunk that would end inside an image extends to the end of that
+  image, because an image's tokens attend to each other in both directions, so
+  chunks with images can exceed `--prefill-step-size`.
 - The checks cover numerical agreement on small synthetic models and one public
   radiograph per checkpoint. Clinical accuracy has not been evaluated.
 
