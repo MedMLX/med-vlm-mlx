@@ -89,6 +89,45 @@ def test_stale_shard_index_loads_present_weights(tmp_path: Path) -> None:
     assert all(mx.array_equal(restored[key], weights[key]).item() for key in weights)
 
 
+def test_stale_shard_index_rejects_incomplete_download(tmp_path: Path) -> None:
+    """Loose files lacking a module the stale index declares must not run text-only."""
+    config = _checkpoint_config()
+    model = GemmaModel(GemmaConfig.from_dict(config))
+    weights = dict(tree_flatten(model.parameters()))
+    language = {k: v for k, v in weights.items() if k.startswith("language_model.")}
+    assert len(language) < len(weights)
+    save_safetensors(str(tmp_path / "model.safetensors"), language)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    stale = {key: "model-00001-of-00002.safetensors" for key in weights}
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": stale})
+    )
+    with pytest.raises(ValueError):
+        load_model(tmp_path)
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_duplicate_tensor_across_loose_files_is_rejected(
+    tmp_path: Path, indexed: bool
+) -> None:
+    config = _checkpoint_config()
+    model = GemmaModel(GemmaConfig.from_dict(config))
+    weights = dict(tree_flatten(model.parameters()))
+    names = list(weights)
+    save_safetensors(str(tmp_path / "a.safetensors"), weights)
+    save_safetensors(
+        str(tmp_path / "b.safetensors"), {names[0]: weights[names[0]]}
+    )
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    if indexed:
+        stale = {key: "absent.safetensors" for key in weights}
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": stale})
+        )
+    with pytest.raises(ValueError, match="a.safetensors.*b.safetensors|b.safetensors.*a.safetensors"):
+        load_model(tmp_path)
+
+
 @pytest.mark.parametrize(
     "case", ["invalid-json", "non-object", "empty", "non-string", "partial", "parent", "absolute"],
 )

@@ -364,7 +364,9 @@ def load_model(
             whose shards are all absent is stale and the loose
             ``*.safetensors`` files are loaded instead.
         ValueError: If the config or shard index is malformed, a shard path is
-            absolute or parent-relative, or model initialization fails.
+            absolute or parent-relative, a tensor name appears in more than one
+            weight file, a module the index declares has no weights (with a
+            stale index, an incomplete download), or model initialization fails.
     """
     options = _native_checkpoint_options(kwargs)
     strict = options.pop("strict", True)
@@ -394,6 +396,9 @@ def load_model(
             if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".safetensors":
                 raise ValueError("Safetensors shards must be relative .safetensors paths")
             shards.append(model_path / relative)
+        # The index's tensor names are the checkpoint manifest even when its
+        # shards are stale, so a module it declares is never dropped as absent.
+        declared_keys = set(weight_map)
         # Hub snapshots legitimately link shard files to their blob cache.
         missing = [path for path in shards if not path.is_file()]
         if len(missing) < len(shards):
@@ -402,11 +407,10 @@ def load_model(
             if missing:
                 raise FileNotFoundError(f"Missing safetensors shard: {missing[0]}")
             weight_files = [str(path) for path in shards]
-            declared_keys = set(weight_map)
         # When no indexed shard exists the index is stale: the published
         # mlx-community MedGemma folders keep the source's index beside their
         # re-sharded files. The loose files load below, and strict loading
-        # still rejects any missing or unexpected parameter.
+        # rejects a declared module they lack (an incomplete download).
     if not weight_files:
         weight_files = [
             wf
@@ -422,8 +426,16 @@ def load_model(
         )
 
     weights: dict[str, mx.array] = {}
+    owners: dict[str, str] = {}
     for wf in weight_files:
-        weights.update(_load_safetensors(wf))
+        for name, tensor in _load_safetensors(wf).items():
+            if name in owners:
+                raise ValueError(
+                    f"Tensor {name!r} appears in both {owners[name]} and {wf}; "
+                    "remove the duplicate weight file"
+                )
+            owners[name] = wf
+            weights[name] = tensor
 
     has_quantization = "quantization" in config
     gemma_config = apply_generation_config_defaults(
