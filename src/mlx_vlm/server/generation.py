@@ -696,6 +696,8 @@ class GenerationArguments:
     thinking_start_token: Optional[str] = None
     thinking_end_token: Optional[str] = None
     skip_special_tokens: bool = True
+    # Per-request ``(width, height)`` bound applied while loading each image.
+    resize_shape: Optional[Tuple[int, int]] = None
 
     def __post_init__(self):
         """Clamp the sampling temperature to the supported minimum."""
@@ -1106,7 +1108,7 @@ class ResponseGenerator:
         # races request threads through the mutable fast-tokenizer backend.
         tokenizer_lock = getattr(self, "_tokenizer_lock", None)
         with tokenizer_lock if tokenizer_lock is not None else nullcontext():
-            raw_inputs = self.cpu_preprocess(prompt, images)
+            raw_inputs = self.cpu_preprocess(prompt, images, args.resize_shape)
             request_ids = raw_inputs.get("input_ids")
             if args.thinking_budget is not None:
                 assert isinstance(request_ids, mx.array)
@@ -1157,8 +1159,13 @@ class ResponseGenerator:
         self,
         prompt: str,
         images: list[ImageSource] | None = None,
+        resize_shape: tuple[int, int] | None = None,
     ) -> ProcessedInputs:
-        """CPU-only: tokenize text, load/resize images. Thread-safe."""
+        """CPU-only: tokenize text, load images and fit them to ``resize_shape``.
+
+        ``resize_shape`` is a ``(width, height)`` bound applied before the image
+        processor's own resize. Thread-safe.
+        """
         assert self.model is not None
         assert self.processor is not None
         add_special_tokens = (
@@ -1173,6 +1180,7 @@ class ResponseGenerator:
             images=images,
             prompts=prompt,
             image_token_index=image_token_index,
+            resize_shape=resize_shape,
             add_special_tokens=add_special_tokens,
         )
 
@@ -1785,7 +1793,7 @@ class ResponseGenerator:
             return
         self.wait_until_ready()
         args = args or GenerationArguments(max_tokens=get_server_max_tokens())
-        raw_inputs = self.cpu_preprocess(prompt, images)
+        raw_inputs = self.cpu_preprocess(prompt, images, args.resize_shape)
         _check_configured_context_budget(
             count_prompt_tokens(raw_inputs), args.max_tokens
         )

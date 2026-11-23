@@ -359,9 +359,14 @@ def load_model(
         nn.Module: The loaded and initialized model.
 
     Raises:
-        FileNotFoundError: If a weight file is missing, including a declared shard.
+        FileNotFoundError: If no weight file is found, or some but not all
+            shards declared by ``model.safetensors.index.json`` exist. An index
+            whose shards are all absent is stale and the loose
+            ``*.safetensors`` files are loaded instead.
         ValueError: If the config or shard index is malformed, a shard path is
-            absolute or parent-relative, or model initialization fails.
+            absolute or parent-relative, a tensor name appears in more than one
+            weight file, a module the index declares has no weights (with a
+            stale index, an incomplete download), or model initialization fails.
     """
     options = _native_checkpoint_options(kwargs)
     strict = options.pop("strict", True)
@@ -374,8 +379,6 @@ def load_model(
     weight_files: list[str] = []
     declared_keys: set[str] = set()
     if index_file.exists():
-        # An index is authoritative: falling back to loose files can silently
-        # load a different checkpoint after an interrupted download or bad edit.
         with open(index_file, encoding="utf-8") as f:
             index: object = json.load(f)
         if not is_json_object(index):
@@ -387,17 +390,28 @@ def load_model(
             raise ValueError(
                 "Safetensors weight_map must map tensor names to shard filenames"
             )
-        declared_keys = set(weight_map)
+        shards: list[Path] = []
         for shard in sorted({value for value in weight_map.values() if isinstance(value, str)}):
             relative = Path(shard)
             if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".safetensors":
                 raise ValueError("Safetensors shards must be relative .safetensors paths")
-            path = model_path / relative
-            if not path.is_file():
-                raise FileNotFoundError(f"Missing safetensors shard: {path}")
-            # Hub snapshots legitimately link shard files to their blob cache.
-            weight_files.append(str(path))
-    else:
+            shards.append(model_path / relative)
+        # The index's tensor names are the checkpoint manifest even when its
+        # shards are stale, so a module it declares is never dropped as absent.
+        declared_keys = set(weight_map)
+        # Hub snapshots legitimately link shard files to their blob cache.
+        missing = [path for path in shards if not path.is_file()]
+        if len(missing) < len(shards):
+            # A partly present shard set is an interrupted download or bad
+            # edit; loading loose files instead could mix checkpoints.
+            if missing:
+                raise FileNotFoundError(f"Missing safetensors shard: {missing[0]}")
+            weight_files = [str(path) for path in shards]
+        # When no indexed shard exists the index is stale: the published
+        # mlx-community MedGemma folders keep the source's index beside their
+        # re-sharded files. The loose files load below, and strict loading
+        # rejects a declared module they lack (an incomplete download).
+    if not weight_files:
         weight_files = [
             wf
             for wf in glob.glob(str(model_path / "*.safetensors"))
@@ -412,8 +426,16 @@ def load_model(
         )
 
     weights: dict[str, mx.array] = {}
+    owners: dict[str, str] = {}
     for wf in weight_files:
-        weights.update(_load_safetensors(wf))
+        for name, tensor in _load_safetensors(wf).items():
+            if name in owners:
+                raise ValueError(
+                    f"Tensor {name!r} appears in both {owners[name]} and {wf}; "
+                    "remove the duplicate weight file"
+                )
+            owners[name] = wf
+            weights[name] = tensor
 
     has_quantization = "quantization" in config
     gemma_config = apply_generation_config_defaults(

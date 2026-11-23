@@ -28,6 +28,7 @@ _OPTIONAL_FLOAT = TypeAdapter(Optional[float])
 _OPTIONAL_INT = TypeAdapter(Optional[int])
 _OPTIONAL_STRING = TypeAdapter(Optional[str])
 _OPTIONAL_BOOL = TypeAdapter(Optional[bool])
+_OPTIONAL_SIZE = TypeAdapter(Optional[tuple[int, int]])
 _FLOAT = TypeAdapter(float)
 _INT = TypeAdapter(int)
 _BOOL = TypeAdapter(bool)
@@ -287,6 +288,10 @@ def build_gen_args(
                 config=config,
             ),
             strict=True,
+        ),
+        # The request schema has already expanded a single size to a square.
+        resize_shape=_OPTIONAL_SIZE.validate_python(
+            getattr(request, "resize_shape", None), strict=True
         ),
     )
     return args

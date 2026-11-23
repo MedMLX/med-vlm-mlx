@@ -70,8 +70,66 @@ def test_strict_load_rejects_missing_medical_weights(tmp_path: Path) -> None:
         load_model(tmp_path)
 
 
+def test_stale_shard_index_loads_present_weights(tmp_path: Path) -> None:
+    """Published MedGemma folders keep a source index that names absent shards."""
+    config = _checkpoint_config()
+    model = GemmaModel(GemmaConfig.from_dict(config))
+    weights = dict(tree_flatten(model.parameters()))
+    save_weights(tmp_path, model)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    stale = {
+        key: f"model-0000{index % 2 + 1}-of-00002.safetensors"
+        for index, key in enumerate(weights)
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": stale})
+    )
+    restored = dict(tree_flatten(load_model(tmp_path).parameters()))
+    assert restored.keys() == weights.keys()
+    assert all(mx.array_equal(restored[key], weights[key]).item() for key in weights)
+
+
+def test_stale_shard_index_rejects_incomplete_download(tmp_path: Path) -> None:
+    """Loose files lacking a module the stale index declares must not run text-only."""
+    config = _checkpoint_config()
+    model = GemmaModel(GemmaConfig.from_dict(config))
+    weights = dict(tree_flatten(model.parameters()))
+    language = {k: v for k, v in weights.items() if k.startswith("language_model.")}
+    assert len(language) < len(weights)
+    save_safetensors(str(tmp_path / "model.safetensors"), language)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    stale = {key: "model-00001-of-00002.safetensors" for key in weights}
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": stale})
+    )
+    with pytest.raises(ValueError):
+        load_model(tmp_path)
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_duplicate_tensor_across_loose_files_is_rejected(
+    tmp_path: Path, indexed: bool
+) -> None:
+    config = _checkpoint_config()
+    model = GemmaModel(GemmaConfig.from_dict(config))
+    weights = dict(tree_flatten(model.parameters()))
+    names = list(weights)
+    save_safetensors(str(tmp_path / "a.safetensors"), weights)
+    save_safetensors(
+        str(tmp_path / "b.safetensors"), {names[0]: weights[names[0]]}
+    )
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    if indexed:
+        stale = {key: "absent.safetensors" for key in weights}
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": stale})
+        )
+    with pytest.raises(ValueError, match="a.safetensors.*b.safetensors|b.safetensors.*a.safetensors"):
+        load_model(tmp_path)
+
+
 @pytest.mark.parametrize(
-    "case", ["invalid-json", "non-object", "empty", "non-string", "missing", "parent", "absolute"],
+    "case", ["invalid-json", "non-object", "empty", "non-string", "partial", "parent", "absolute"],
 )
 def test_invalid_shard_index_never_loads_loose_or_external_weights(
     tmp_path: Path, case: str,
@@ -87,14 +145,16 @@ def test_invalid_shard_index_never_loads_loose_or_external_weights(
     payloads: dict[str, object] = {
         "non-object": [], "empty": {"weight_map": {}},
         "non-string": {"weight_map": {"weight": 1}},
-        "missing": {"weight_map": {"weight": "missing.safetensors"}},
+        "partial": {
+            "weight_map": {"weight": "model.safetensors", "bias": "missing.safetensors"}
+        },
         "parent": {"weight_map": {"weight": "../external.safetensors"}},
         "absolute": {"weight_map": {"weight": str(external)}},
     }
     (folder / "model.safetensors.index.json").write_text(
         "{" if case == "invalid-json" else json.dumps(payloads[case])
     )
-    if case == "missing":
+    if case == "partial":
         with pytest.raises(FileNotFoundError):
             load_model(folder)
     else:

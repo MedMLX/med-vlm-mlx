@@ -112,8 +112,8 @@ print(response.text)
   (and an optional `cache_dir`) it uses only the Hugging Face cache and raises instead of
   downloading.
 - `stream_generate` takes the same arguments and yields `GenerationResult` text segments;
-  iterate it to the end so the prompt cache and cleanup run. The final result has
-  `finish_reason` and `token_ids`, which include the stop token.
+  the prompt cache is saved before the final result, which has `finish_reason` and
+  `token_ids`, including the stop token.
 - `batch_generate` shares the same generation and cache code.
 
 ### HTTP server
@@ -151,9 +151,9 @@ The server binds 127.0.0.1:8080 by default; schemas are at `/docs` while it runs
 - Only MedGemma (Gemma3) checkpoints load. Checkpoint Python code (`model_file`)
   and external speculative drafters are refused.
 - Inference only, on Metal: no training or adapters.
-- Prompts with images are prefilled whole, because a chunk could split an
-  image's bidirectional attention block; text-only prompts use chunked prefill.
-  The full prompt mask grows with the square of the prompt length.
+- A prefill chunk that would end inside an image extends to the end of that
+  image, because an image's tokens attend to each other in both directions, so
+  chunks with images can exceed `--prefill-step-size`.
 - Clinical accuracy has not been evaluated.
 
 ## Use with MedMLX
