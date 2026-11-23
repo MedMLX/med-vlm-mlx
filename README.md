@@ -113,8 +113,8 @@ print(response.text)
   (and an optional `cache_dir`) it uses only the Hugging Face cache and raises instead of
   downloading.
 - `stream_generate` takes the same arguments and yields `GenerationResult` text segments;
-  iterate it to the end so the prompt cache and cleanup run. The final result has
-  `finish_reason` and `token_ids`, which include the stop token.
+  the prompt cache is saved before the final result, which has `finish_reason` and
+  `token_ids`, including the stop token.
 - `batch_generate` shares the same generation and cache code.
 
 ### HTTP server
