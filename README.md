@@ -37,9 +37,8 @@ source .venv/bin/activate
 uv pip install "med-vlm-mlx>=0.3.4"
 ```
 
-Needs macOS on Apple Silicon with Metal and Python 3.13. The package
-imports as `mlx_vlm`, so install it in a separate environment from upstream
-`mlx-vlm`: both install the same modules.
+The package imports as `mlx_vlm`, so install it in a separate environment from
+upstream `mlx-vlm`: both install the same modules.
 
 ## Run
 
@@ -151,13 +150,11 @@ The server binds 127.0.0.1:8080 by default; schemas are at `/docs` while it runs
   turns are rejected.
 - Only MedGemma (Gemma3) checkpoints load. Checkpoint Python code (`model_file`)
   and external speculative drafters are refused.
-- Inference only, on Metal: no training, adapters, or CPU, MPS or PyTorch
-  fallback.
+- Inference only, on Metal: no training or adapters.
 - Prompts with images are prefilled whole, because a chunk could split an
   image's bidirectional attention block; text-only prompts use chunked prefill.
   The full prompt mask grows with the square of the prompt length.
-- The checks cover numerical agreement on small synthetic models and one public
-  radiograph per checkpoint. Clinical accuracy has not been evaluated.
+- Clinical accuracy has not been evaluated.
 
 ## Use with MedMLX
 
