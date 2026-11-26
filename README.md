@@ -21,11 +21,11 @@ Run MedGemma locally on Apple Silicon. Includes Python, CLI and HTTP interfaces.
 | :--- | :--- |
 | Image + text prompt | Generated text |
 
-| Model | Weights download | Peak MLX memory |
-| :--- | ---: | ---: |
-| MedGemma 1.5 4B | 3.4 GB | 4.4 GB |
-| MedGemma 4B | 3.0 GB | 4.1 GB |
-| MedGemma 27B | 16.9 GB | 17.9 GB |
+| Model | Weights download | Peak MLX memory | Measured on |
+| :--- | ---: | ---: | :--- |
+| MedGemma 1.5 4B | 3.4 GB | 4.4 GB | 1929×2207 chest radiograph, 256 new tokens |
+| MedGemma 4B | 3.0 GB | 4.1 GB | 1929×2207 chest radiograph, 256 new tokens |
+| MedGemma 27B | 16.9 GB | 17.9 GB | 1929×2207 chest radiograph, 256 new tokens |
 
 Peak memory is for describing a 1929×2207 chest radiograph in up to 256 tokens.
 
