@@ -1,4 +1,4 @@
-"""MLX 0.32.4 neural-network APIs used by med-vlm-mlx, from the installed source.
+"""MLX 0.32.5 neural-network APIs used by med-vlm-mlx, from the installed source.
 
 Covers python/mlx/nn/layers/{base,linear,embedding,positional_encoding,
 normalization,activations,convolution,pooling,quantized}.py as this repository

@@ -9,7 +9,7 @@ description = "Run MedGemma locally on Apple Silicon with Python, CLI and HTTP i
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "mlx>=0.32.4,<0.33; platform_system == 'Darwin' and platform_machine == 'arm64'",
+    "mlx>=0.32.5,<0.33; platform_system == 'Darwin' and platform_machine == 'arm64'",
     "transformers==5.19.0",
     "jinja2>=3.1.6",
     "sentencepiece>=0.2.1",

@@ -1,4 +1,4 @@
-"""MLX 0.32.4 tree utilities used by med-vlm-mlx, from the installed mlx/utils.py.
+"""MLX 0.32.5 tree utilities used by med-vlm-mlx, from the installed mlx/utils.py.
 
 MLX ships stubs for mlx.core only. These declarations cover the calls this
 repository makes; they are not complete coverage of mlx.utils.
