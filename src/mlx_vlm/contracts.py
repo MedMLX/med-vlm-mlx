@@ -29,7 +29,7 @@ class _Evaluation(Protocol):
 
 def evaluate(*values: object) -> None:
     """Evaluate array leaves; MLX ignores non-array leaves in nested containers."""
-    # MLX 0.32.3 documents this API but leaves its variadic arguments untyped.
+    # MLX 0.32.5 documents this API but leaves its variadic arguments untyped.
     cast(_Evaluation, getattr(mx, "eval"))(*values)
 
 

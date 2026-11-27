@@ -1,6 +1,6 @@
 """Typed boundary for the native MLX custom-kernel factory.
 
-MLX 0.32 declares the factory result as ``object`` in its stub. The protocol
+MLX 0.32.5 declares the factory result as ``object`` in its stub. The protocol
 below follows the native callable's documented signature; execution, stream
 selection, compilation options, and array dtypes remain owned by MLX.
 """
