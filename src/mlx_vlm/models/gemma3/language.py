@@ -103,7 +103,8 @@ class Attention(nn.Module):
             x: Normalized hidden states.
             mask: Mask or MLX ``"causal"`` sentinel, used only when
                 ``prompt_mask`` is ``None``. An array is trimmed to the last
-                ``key_len`` columns.
+                ``key_len`` columns. A sliding layer adds its window to the
+                sentinel natively, which requires temporally ordered keys.
             cache: Layer KV cache. RoPE positions start at ``cache.offset``.
             prompt_mask: Dense prompt mask or compact key validity. When given
                 it replaces ``mask``; this layer builds only its Q-by-K slice.
@@ -171,7 +172,13 @@ class Attention(nn.Module):
                 mask = mask[..., -key_len:]
 
         output = scaled_dot_product_attention(
-            queries, keys, values, cache, scale=self.scale, mask=mask
+            queries,
+            keys,
+            values,
+            cache,
+            scale=self.scale,
+            mask=mask,
+            window_size=self.window_size if isinstance(mask, str) else None,
         )
         output = mx.reshape(mx.transpose(output, (0, 2, 1, 3)), (B, L, -1))
         return self.o_proj(output)
@@ -429,9 +436,17 @@ class Gemma3Model(nn.Module):
                 None,
             )
             global_mask = create_attention_mask(h, global_cache)
-            sliding_window_mask = create_attention_mask(
-                h, local_cache, window_size=self.window_size
-            )
+            if h.shape[1] > 1 and (
+                local_cache is None
+                or isinstance(local_cache, (KVCache, RotatingKVCache))
+            ):
+                # Multi-token steps fetch keys in temporal order, so the
+                # sliding layers apply their window natively in SDPA.
+                sliding_window_mask = "causal"
+            else:
+                sliding_window_mask = create_attention_mask(
+                    h, local_cache, window_size=self.window_size
+                )
 
         for i, (layer, c) in enumerate(zip(self.layers, cache)):
             is_global = (

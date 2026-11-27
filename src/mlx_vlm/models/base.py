@@ -182,7 +182,8 @@ def create_attention_mask(
 
     A cache providing ``make_mask`` decides the layout; otherwise single-token
     steps return ``None``, and wider steps return ``"causal"`` unless an array
-    is requested or a sliding window applies.
+    is requested. Without a cache, a sliding window belongs to SDPA's native
+    ``window_size``.
     """
     N = h.shape[1]
     if (
@@ -193,7 +194,7 @@ def create_attention_mask(
         return cache.make_mask(N, return_array=return_array, window_size=window_size)
     if N == 1:
         return None
-    if return_array or (window_size and N > window_size):
+    if return_array:
         return create_causal_mask(N, window_size=window_size)
     return "causal"
 
@@ -289,13 +290,21 @@ def scaled_dot_product_attention(
     scale: float,
     mask: mx.array | str | None,
     sinks: Optional[mx.array] = None,
+    window_size: Optional[int] = None,
 ) -> mx.array:
-    """Apply cache-aware attention with an array mask or MLX causal sentinel."""
+    """Apply cache-aware attention with an array mask or MLX causal sentinel.
+
+    ``window_size`` is passed to MLX's native sliding window, which keeps keys
+    less than ``window_size`` positions from each query with the last query
+    aligned to the last key. It is exact only for keys in temporal order.
+    """
     if isinstance(cache, (QuantizedKVCache, BatchQuantizedKVCache)):
         if not _is_quantized_tensor(keys) or not _is_quantized_tensor(values):
             raise TypeError("Uniform-quantized cache requires packed K/V tuples")
         if sinks is not None:
             raise ValueError("Quantized SDPA does not support attention sinks.")
+        if window_size is not None:
+            raise ValueError("Quantized SDPA does not support a native window.")
         return quantized_scaled_dot_product_attention(
             queries,
             keys,
@@ -313,6 +322,7 @@ def scaled_dot_product_attention(
         keys,
         values,
         scale=scale,
+        window_size=-1 if window_size is None else window_size,
         mask=mask,
         sinks=sinks,
     )
